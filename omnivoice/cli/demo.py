@@ -772,9 +772,9 @@ or auto voice.
                     batch_pp,
                     batch_po,
                 ) = _gen_settings()
-                batch_output_files = gr.File(
-                    label="Generated Audio Files / 输出文件",
-                    file_count="multiple",
+                batch_output_files = gr.Audio(
+                    label="Merged Batch Audio / 合并结果",
+                    type="filepath",
                 )
 
                 for i in range(BATCH_MAX_ROWS):
@@ -879,12 +879,28 @@ or auto voice.
                     batch_output_dir = _default_batch_output_dir()
                     batch_output_dir.mkdir(parents=True, exist_ok=True)
 
+                    def _merge_audios(audio_arrays: List[np.ndarray]) -> np.ndarray:
+                        if not audio_arrays:
+                            return np.zeros(0, dtype=np.float32)
+                        separator = np.zeros(int(model.sampling_rate * 0.35), dtype=np.float32)
+                        merged_parts = []
+                        for idx, audio_array in enumerate(audio_arrays):
+                            audio_np = np.asarray(audio_array, dtype=np.float32).reshape(-1)
+                            if audio_np.size == 0:
+                                continue
+                            merged_parts.append(audio_np)
+                            if idx != len(audio_arrays) - 1:
+                                merged_parts.append(separator)
+                        if not merged_parts:
+                            return np.zeros(0, dtype=np.float32)
+                        return np.concatenate(merged_parts)
+
                     def _save_audio(audio_array, row_index: int, voice_name: Optional[str]):
                         out_path = batch_output_dir / f"omnioutput_{time.time_ns()}.wav"
                         sf.write(str(out_path), audio_array, model.sampling_rate)
                         return str(out_path)
 
-                    output_files = []
+                    row_audios = []
 
                     try:
                         for r in sorted(rows, key=lambda x: x["index"]):
@@ -911,16 +927,22 @@ or auto voice.
 
                             audio = model.generate(**gen_kwargs)
                             waveform = audio[0]
-                            output_files.append(_save_audio(waveform, r["index"], r["voice_name"]))
+                            row_audios.append(waveform)
 
                     except Exception as e:
-                        return [], f"Error: {type(e).__name__}: {e}"
+                        return None, f"Error: {type(e).__name__}: {e}"
+
+                    merged_audio = _merge_audios(row_audios)
+                    if merged_audio.size == 0:
+                        return None, "No valid audio was generated."
+
+                    merged_path = _save_audio(merged_audio, 0, None)
 
                     summary = (
-                        f"Generated {len(output_files)} file(s) in {batch_output_dir}. "
+                        f"Generated 1 merged file in {batch_output_dir}. "
                         f"Saved outputs persist across restarts."
                     )
-                    return output_files, summary
+                    return merged_path, summary
 
                 batch_add_btn.click(
                     _batch_add,
