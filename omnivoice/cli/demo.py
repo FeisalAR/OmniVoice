@@ -749,6 +749,9 @@ or auto voice.
                     items = audio_manager.get_list()
                     return [gr.update(choices=items, value=None) for _ in batch_voice_dropdowns]
 
+                def _plain_value(v):
+                    return getattr(v, "value", v)
+
                 with gr.Row():
                     batch_add_btn = gr.Button("Add Item / 添加一行", variant="primary")
                     batch_remove_btn = gr.Button("Remove Item / 删除一行", variant="secondary")
@@ -819,8 +822,24 @@ or auto voice.
 
                 def _batch_generate(
                     current_count,
+                    num_step,
+                    guidance_scale,
+                    denoise,
+                    speed_setting,
+                    duration_setting,
+                    preprocess_prompt,
+                    postprocess_output,
                     *row_values,
                 ):
+                    current_count = _plain_value(current_count)
+                    num_step = _plain_value(num_step)
+                    guidance_scale = _plain_value(guidance_scale)
+                    denoise = _plain_value(denoise)
+                    speed_setting = _plain_value(speed_setting)
+                    duration_setting = _plain_value(duration_setting)
+                    preprocess_prompt = _plain_value(preprocess_prompt)
+                    postprocess_output = _plain_value(postprocess_output)
+
                     rows = []
                     step = 5
                     for i in range(BATCH_MAX_ROWS):
@@ -849,77 +868,53 @@ or auto voice.
                         return [], "No batch items to generate."
 
                     gen_config = OmniVoiceGenerationConfig(
-                        num_step=int(batch_ns or 32),
-                        guidance_scale=float(batch_gs) if batch_gs is not None else 2.0,
-                        denoise=bool(batch_dn) if batch_dn is not None else True,
-                        preprocess_prompt=bool(batch_pp),
-                        postprocess_output=bool(batch_po),
+                        num_step=int(num_step or 32),
+                        guidance_scale=float(guidance_scale) if guidance_scale is not None else 2.0,
+                        denoise=bool(denoise) if denoise is not None else True,
+                        preprocess_prompt=bool(preprocess_prompt),
+                        postprocess_output=bool(postprocess_output),
                     )
-                    duration = float(batch_du) if batch_du is not None and float(batch_du) > 0 else None
-                    speed = float(batch_sp) if batch_sp is not None and float(batch_sp) != 1.0 else None
+                    duration = float(duration_setting) if duration_setting is not None and float(duration_setting) > 0 else None
+                    speed = float(speed_setting) if speed_setting is not None and float(speed_setting) != 1.0 else None
                     batch_output_dir = _default_batch_output_dir()
                     batch_output_dir.mkdir(parents=True, exist_ok=True)
-                    timestamp = int(time.time())
 
                     def _save_audio(audio_array, row_index: int, voice_name: Optional[str]):
                         out_path = batch_output_dir / f"omnioutput_{time.time_ns()}.wav"
                         sf.write(str(out_path), audio_array, model.sampling_rate)
                         return str(out_path)
 
-                    results_by_index: Dict[int, np.ndarray] = {}
-                    clone_rows = [r for r in rows if r["voice_name"]]
-                    plain_rows = [r for r in rows if not r["voice_name"]]
+                    output_files = []
 
                     try:
-                        if clone_rows:
-                            clone_prompts = []
-                            for r in clone_rows:
+                        for r in sorted(rows, key=lambda x: x["index"]):
+                            gen_kwargs = dict(
+                                text=r["text"],
+                                language=r["lang"],
+                                instruct=r["instruct"],
+                                duration=duration,
+                                speed=speed,
+                                generation_config=gen_config,
+                            )
+
+                            if r["voice_name"]:
                                 ref_path = audio_manager.get_path(r["voice_name"])
                                 if not ref_path:
                                     raise ValueError(
                                         f"Reference voice '{r['voice_name']}' not found in the library."
                                     )
-                                clone_prompts.append(
-                                    model.create_voice_clone_prompt(
-                                        ref_audio=ref_path,
-                                        ref_text=r["ref_text"],
-                                        preprocess_prompt=bool(batch_pp),
-                                    )
+                                gen_kwargs["voice_clone_prompt"] = model.create_voice_clone_prompt(
+                                    ref_audio=ref_path,
+                                    ref_text=r["ref_text"],
+                                    preprocess_prompt=bool(preprocess_prompt),
                                 )
 
-                            clone_audios = model.generate(
-                                text=[r["text"] for r in clone_rows],
-                                language=[r["lang"] for r in clone_rows],
-                                voice_clone_prompt=clone_prompts,
-                                instruct=[r["instruct"] for r in clone_rows],
-                                duration=duration,
-                                speed=speed,
-                                generation_config=gen_config,
-                            )
-                            for r, audio in zip(clone_rows, clone_audios):
-                                results_by_index[r["index"]] = audio
-
-                        if plain_rows:
-                            plain_audios = model.generate(
-                                text=[r["text"] for r in plain_rows],
-                                language=[r["lang"] for r in plain_rows],
-                                instruct=[r["instruct"] for r in plain_rows],
-                                duration=duration,
-                                speed=speed,
-                                generation_config=gen_config,
-                            )
-                            for r, audio in zip(plain_rows, plain_audios):
-                                results_by_index[r["index"]] = audio
+                            audio = model.generate(**gen_kwargs)
+                            waveform = audio[0]
+                            output_files.append(_save_audio(waveform, r["index"], r["voice_name"]))
 
                     except Exception as e:
                         return [], f"Error: {type(e).__name__}: {e}"
-
-                    output_files = []
-                    for r in sorted(rows, key=lambda x: x["index"]):
-                        audio = results_by_index.get(r["index"])
-                        if audio is None:
-                            continue
-                        output_files.append(_save_audio(audio, r["index"], r["voice_name"]))
 
                     summary = (
                         f"Generated {len(output_files)} file(s) in {batch_output_dir}. "
@@ -956,7 +951,17 @@ or auto voice.
                     )
                 batch_btn.click(
                     _batch_generate,
-                    inputs=[batch_count, *batch_inputs],
+                    inputs=[
+                        batch_count,
+                        batch_ns,
+                        batch_gs,
+                        batch_dn,
+                        batch_sp,
+                        batch_du,
+                        batch_pp,
+                        batch_po,
+                        *batch_inputs,
+                    ],
                     outputs=[batch_output_files, batch_status],
                 )
 
