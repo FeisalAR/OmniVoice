@@ -27,11 +27,13 @@ import argparse
 import json
 import logging
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import gradio as gr
 import numpy as np
+import soundfile as sf
 import torch
 
 from omnivoice import OmniVoice, OmniVoiceGenerationConfig
@@ -46,6 +48,25 @@ def _default_ref_audio_storage_dir() -> Path:
     """Return the repo-local directory for persistent reference audio storage."""
     project_root = Path(__file__).resolve().parents[2]
     return project_root / ".omnivoice" / "reference_audio"
+
+
+def _default_batch_output_dir() -> Path:
+    """Return the repo-local directory for generated batch outputs."""
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / ".omnivoice" / "batch_outputs"
+
+
+def _default_demo_output_dir() -> Path:
+    """Return the repo-local directory for single-output demo files."""
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / ".omnivoice" / "demo_outputs"
+
+
+def _safe_path_part(value: str) -> str:
+    """Return a filesystem-safe path fragment."""
+    safe = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in value)
+    safe = safe.strip("_")
+    return safe or "item"
 
 
 class ReferenceAudioManager:
@@ -343,8 +364,12 @@ def build_demo(
         except Exception as e:
             return None, f"Error: {type(e).__name__}: {e}"
 
-        waveform = (audio[0] * 32767).astype(np.int16)
-        return (sampling_rate, waveform), "Done."
+        demo_output_dir = _default_demo_output_dir()
+        demo_output_dir.mkdir(parents=True, exist_ok=True)
+        out_path = demo_output_dir / f"omnioutput_{time.time_ns()}.wav"
+        waveform = audio[0]
+        sf.write(str(out_path), waveform, sampling_rate)
+        return str(out_path), "Done."
 
     # Allow external wrappers (e.g. spaces.GPU for ZeroGPU Spaces)
     _gen = generate_fn if generate_fn is not None else _gen_core
@@ -629,7 +654,7 @@ then select them in the Voice Clone tab.
                     with gr.Column(scale=1):
                         vc_audio = gr.Audio(
                             label="Output Audio / 合成结果",
-                            type="numpy",
+                            type="filepath",
                         )
                         vc_status = gr.Textbox(label="Status / 状态", lines=2)
 
@@ -689,6 +714,253 @@ then select them in the Voice Clone tab.
                 )
 
             # ==============================================================
+            # Batch Generate
+            # ==============================================================
+            with gr.TabItem("Batch Generate"):
+                gr.Markdown(
+                    """
+## Batch Generate
+
+Add or remove rows, then assign each text its own voice from the library
+when available. Rows without a selected voice can still use voice design
+or auto voice.
+"""
+                )
+
+                batch_count = gr.State(1)
+                BATCH_MAX_ROWS = 8
+                batch_row_containers = []
+                batch_textboxes = []
+                batch_voice_dropdowns = []
+                batch_ref_textboxes = []
+                batch_lang_dropdowns = []
+                batch_instruct_textboxes = []
+
+                def _batch_row_visibility(count: int):
+                    return [gr.update(visible=i < count) for i in range(BATCH_MAX_ROWS)]
+
+                def _batch_status_text(count: int):
+                    return (
+                        f"Showing {count} batch item(s). "
+                        f"Use the voice library dropdown per row when you want cloning."
+                    )
+
+                def _batch_library_choices_update():
+                    items = audio_manager.get_list()
+                    return [gr.update(choices=items, value=None) for _ in batch_voice_dropdowns]
+
+                with gr.Row():
+                    batch_add_btn = gr.Button("Add Item / 添加一行", variant="primary")
+                    batch_remove_btn = gr.Button("Remove Item / 删除一行", variant="secondary")
+                    batch_refresh_btn = gr.Button("Refresh Voices / 刷新语音库", variant="secondary")
+
+                batch_status = gr.Textbox(
+                    label="Batch Status / 批量状态",
+                    value=_batch_status_text(1),
+                    interactive=False,
+                )
+
+                (
+                    batch_ns,
+                    batch_gs,
+                    batch_dn,
+                    batch_sp,
+                    batch_du,
+                    batch_pp,
+                    batch_po,
+                ) = _gen_settings()
+                batch_output_files = gr.File(
+                    label="Generated Audio Files / 输出文件",
+                    file_count="multiple",
+                )
+
+                for i in range(BATCH_MAX_ROWS):
+                    with gr.Row(visible=(i == 0)) as batch_row:
+                        with gr.Column(scale=2):
+                            text_i = gr.Textbox(
+                                label=f"Text {i + 1} / 文本 {i + 1}",
+                                lines=3,
+                                placeholder="Enter the text you want to synthesize...",
+                            )
+                        with gr.Column(scale=1):
+                            voice_i = gr.Dropdown(
+                                label=f"Voice {i + 1} / 语音 {i + 1}",
+                                choices=initial_ref_items,
+                                value=None,
+                                allow_custom_value=False,
+                                info="Select a named voice from the library if you want voice cloning.",
+                            )
+                            ref_text_i = gr.Textbox(
+                                label=f"Reference Text {i + 1} (optional)",
+                                lines=2,
+                                placeholder="Transcript for the selected reference audio.",
+                            )
+                            lang_i = _lang_dropdown(f"Language {i + 1} (optional)", value="Auto")
+                            instruct_i = gr.Textbox(
+                                label=f"Instruct {i + 1} (optional)",
+                                lines=2,
+                                placeholder="Style description for voice design if no voice is selected.",
+                            )
+
+                    batch_row_containers.append(batch_row)
+                    batch_textboxes.append(text_i)
+                    batch_voice_dropdowns.append(voice_i)
+                    batch_ref_textboxes.append(ref_text_i)
+                    batch_lang_dropdowns.append(lang_i)
+                    batch_instruct_textboxes.append(instruct_i)
+
+                def _batch_add(current_count: int):
+                    new_count = max(1, min(BATCH_MAX_ROWS, current_count + 1))
+                    return [new_count, *(_batch_row_visibility(new_count)), _batch_status_text(new_count)]
+
+                def _batch_remove(current_count: int):
+                    new_count = max(1, min(BATCH_MAX_ROWS, current_count - 1))
+                    return [new_count, *(_batch_row_visibility(new_count)), _batch_status_text(new_count)]
+
+                def _batch_generate(
+                    current_count,
+                    *row_values,
+                ):
+                    rows = []
+                    step = 5
+                    for i in range(BATCH_MAX_ROWS):
+                        offset = i * step
+                        text = row_values[offset]
+                        voice_name = row_values[offset + 1]
+                        ref_text = row_values[offset + 2]
+                        lang = row_values[offset + 3]
+                        instruct = row_values[offset + 4]
+                        if i >= int(current_count or 1):
+                            continue
+                        if not text or not str(text).strip():
+                            continue
+                        rows.append(
+                            {
+                                "index": i,
+                                "text": str(text).strip(),
+                                "voice_name": voice_name if voice_name else None,
+                                "ref_text": ref_text.strip() if isinstance(ref_text, str) and ref_text.strip() else None,
+                                "lang": lang if lang and lang != "Auto" else None,
+                                "instruct": instruct.strip() if isinstance(instruct, str) and instruct.strip() else None,
+                            }
+                        )
+
+                    if not rows:
+                        return [], "No batch items to generate."
+
+                    gen_config = OmniVoiceGenerationConfig(
+                        num_step=int(batch_ns or 32),
+                        guidance_scale=float(batch_gs) if batch_gs is not None else 2.0,
+                        denoise=bool(batch_dn) if batch_dn is not None else True,
+                        preprocess_prompt=bool(batch_pp),
+                        postprocess_output=bool(batch_po),
+                    )
+                    duration = float(batch_du) if batch_du is not None and float(batch_du) > 0 else None
+                    speed = float(batch_sp) if batch_sp is not None and float(batch_sp) != 1.0 else None
+                    batch_output_dir = _default_batch_output_dir()
+                    batch_output_dir.mkdir(parents=True, exist_ok=True)
+                    timestamp = int(time.time())
+
+                    def _save_audio(audio_array, row_index: int, voice_name: Optional[str]):
+                        out_path = batch_output_dir / f"omnioutput_{time.time_ns()}.wav"
+                        sf.write(str(out_path), audio_array, model.sampling_rate)
+                        return str(out_path)
+
+                    results_by_index: Dict[int, np.ndarray] = {}
+                    clone_rows = [r for r in rows if r["voice_name"]]
+                    plain_rows = [r for r in rows if not r["voice_name"]]
+
+                    try:
+                        if clone_rows:
+                            clone_prompts = []
+                            for r in clone_rows:
+                                ref_path = audio_manager.get_path(r["voice_name"])
+                                if not ref_path:
+                                    raise ValueError(
+                                        f"Reference voice '{r['voice_name']}' not found in the library."
+                                    )
+                                clone_prompts.append(
+                                    model.create_voice_clone_prompt(
+                                        ref_audio=ref_path,
+                                        ref_text=r["ref_text"],
+                                        preprocess_prompt=bool(batch_pp),
+                                    )
+                                )
+
+                            clone_audios = model.generate(
+                                text=[r["text"] for r in clone_rows],
+                                language=[r["lang"] for r in clone_rows],
+                                voice_clone_prompt=clone_prompts,
+                                instruct=[r["instruct"] for r in clone_rows],
+                                duration=duration,
+                                speed=speed,
+                                generation_config=gen_config,
+                            )
+                            for r, audio in zip(clone_rows, clone_audios):
+                                results_by_index[r["index"]] = audio
+
+                        if plain_rows:
+                            plain_audios = model.generate(
+                                text=[r["text"] for r in plain_rows],
+                                language=[r["lang"] for r in plain_rows],
+                                instruct=[r["instruct"] for r in plain_rows],
+                                duration=duration,
+                                speed=speed,
+                                generation_config=gen_config,
+                            )
+                            for r, audio in zip(plain_rows, plain_audios):
+                                results_by_index[r["index"]] = audio
+
+                    except Exception as e:
+                        return [], f"Error: {type(e).__name__}: {e}"
+
+                    output_files = []
+                    for r in sorted(rows, key=lambda x: x["index"]):
+                        audio = results_by_index.get(r["index"])
+                        if audio is None:
+                            continue
+                        output_files.append(_save_audio(audio, r["index"], r["voice_name"]))
+
+                    summary = (
+                        f"Generated {len(output_files)} file(s) in {batch_output_dir}. "
+                        f"Saved outputs persist across restarts."
+                    )
+                    return output_files, summary
+
+                batch_add_btn.click(
+                    _batch_add,
+                    inputs=[batch_count],
+                    outputs=[batch_count, *batch_row_containers, batch_status],
+                )
+                batch_remove_btn.click(
+                    _batch_remove,
+                    inputs=[batch_count],
+                    outputs=[batch_count, *batch_row_containers, batch_status],
+                )
+                batch_refresh_btn.click(
+                    lambda: _batch_library_choices_update(),
+                    outputs=batch_voice_dropdowns,
+                )
+
+                batch_btn = gr.Button("Generate Batch / 批量生成", variant="primary")
+                batch_inputs = []
+                for i in range(BATCH_MAX_ROWS):
+                    batch_inputs.extend(
+                        [
+                            batch_textboxes[i],
+                            batch_voice_dropdowns[i],
+                            batch_ref_textboxes[i],
+                            batch_lang_dropdowns[i],
+                            batch_instruct_textboxes[i],
+                        ]
+                    )
+                batch_btn.click(
+                    _batch_generate,
+                    inputs=[batch_count, *batch_inputs],
+                    outputs=[batch_output_files, batch_status],
+                )
+
+            # ==============================================================
             # Voice Design
             # ==============================================================
             with gr.TabItem("Voice Design"):
@@ -726,7 +998,7 @@ then select them in the Voice Clone tab.
                     with gr.Column(scale=1):
                         vd_audio = gr.Audio(
                             label="Output Audio / 合成结果",
-                            type="numpy",
+                            type="filepath",
                         )
                         vd_status = gr.Textbox(label="Status / 状态", lines=2)
 
