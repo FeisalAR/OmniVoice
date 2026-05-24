@@ -24,8 +24,11 @@ Usage:
 """
 
 import argparse
+import json
 import logging
-from typing import Any, Dict
+import shutil
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import gradio as gr
 import numpy as np
@@ -34,6 +37,120 @@ import torch
 from omnivoice import OmniVoice, OmniVoiceGenerationConfig
 from omnivoice.utils.common import get_best_device
 from omnivoice.utils.lang_map import LANG_NAMES, lang_display_name
+
+
+# ---------------------------------------------------------------------------
+# Reference Audio Manager — persistent storage
+# ---------------------------------------------------------------------------
+def _default_ref_audio_storage_dir() -> Path:
+    """Return the repo-local directory for persistent reference audio storage."""
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / ".omnivoice" / "reference_audio"
+
+
+class ReferenceAudioManager:
+    """Manages named reference audio files for the demo.
+    
+    Each audio is stored with a user-assigned name, accessible across
+    the session. Supports upload, list, and delete operations.
+    """
+
+    def __init__(self, storage_dir: Optional[str] = None):
+        """Initialize the manager with a storage directory.
+        
+        Args:
+            storage_dir: Directory to store audio files. If None, uses a repo-local
+                persistent directory under `.omnivoice/reference_audio`.
+        """
+        if storage_dir is None:
+            storage_dir = _default_ref_audio_storage_dir()
+        self.storage_dir = Path(storage_dir)
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self.manifest_file = self.storage_dir / "manifest.json"
+        self._load_manifest()
+
+    def _load_manifest(self):
+        """Load or create the manifest file."""
+        if self.manifest_file.exists():
+            with open(self.manifest_file, "r") as f:
+                self._manifest = json.load(f)
+        else:
+            self._manifest = {}
+        # Validate that all referenced files exist
+        self._manifest = {
+            name: path
+            for name, path in self._manifest.items()
+            if Path(path).exists()
+        }
+        self._save_manifest()
+
+    def _save_manifest(self):
+        """Save the manifest to disk."""
+        with open(self.manifest_file, "w") as f:
+            json.dump(self._manifest, f, indent=2)
+
+    def upload_audio(self, audio_path: str, name: str) -> str:
+        """Upload and register a reference audio with a user-assigned name.
+        
+        Args:
+            audio_path: Path to the uploaded audio file.
+            name: User-friendly name for the audio (e.g., "John's Voice").
+        
+        Returns:
+            The stored audio path.
+        
+        Raises:
+            ValueError: If the name is empty or the audio file doesn't exist.
+        """
+        if not name or not name.strip():
+            raise ValueError("Audio name cannot be empty.")
+        if not Path(audio_path).exists():
+            raise ValueError(f"Audio file not found: {audio_path}")
+
+        # Sanitize name (remove special chars, keep alphanumeric + spaces)
+        safe_name = "".join(c if c.isalnum() or c in (" ", "_", "-") else "" for c in name).strip()
+        if not safe_name:
+            raise ValueError("Audio name must contain at least one alphanumeric character.")
+
+        # Check if name already exists and overwrite
+        stored_path = self.storage_dir / f"{safe_name}.wav"
+        shutil.copy(audio_path, str(stored_path))
+        self._manifest[name] = str(stored_path)
+        self._save_manifest()
+        return name
+
+    def get_list(self) -> List[str]:
+        """Return list of all registered audio names."""
+        return sorted(self._manifest.keys())
+
+    def get_path(self, name: str) -> Optional[str]:
+        """Get the file path for a registered audio name."""
+        return self._manifest.get(name)
+
+    def delete_audio(self, name: str) -> bool:
+        """Delete a registered audio.
+        
+        Args:
+            name: Name of the audio to delete.
+        
+        Returns:
+            True if deletion succeeded, False if name not found.
+        """
+        if name not in self._manifest:
+            return False
+        path = Path(self._manifest[name])
+        if path.exists():
+            path.unlink()
+        del self._manifest[name]
+        self._save_manifest()
+        return True
+
+    def clear_all(self):
+        """Delete all registered audios (for cleanup)."""
+        for path in self._manifest.values():
+            Path(path).unlink(missing_ok=True)
+        self._manifest.clear()
+        self._save_manifest()
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +270,11 @@ def build_demo(
     model: OmniVoice,
     checkpoint: str,
     generate_fn=None,
+    audio_manager: Optional[ReferenceAudioManager] = None,
 ) -> gr.Blocks:
+
+    if audio_manager is None:
+        audio_manager = ReferenceAudioManager()
 
     sampling_rate = model.sampling_rate
 
@@ -171,6 +292,7 @@ def build_demo(
         preprocess_prompt,
         postprocess_output,
         mode,
+        ref_audio_name=None,
         ref_text=None,
     ):
         if not text or not text.strip():
@@ -196,10 +318,20 @@ def build_demo(
             kw["duration"] = float(duration)
 
         if mode == "clone":
-            if not ref_audio:
-                return None, "Please upload a reference audio."
+            # Resolve reference audio: either from library by name or direct upload
+            final_ref_audio = None
+            if ref_audio_name and ref_audio_name != "None":
+                final_ref_audio = audio_manager.get_path(ref_audio_name)
+                if not final_ref_audio:
+                    return None, f"Reference audio '{ref_audio_name}' not found in library."
+            elif ref_audio:
+                final_ref_audio = ref_audio
+            
+            if not final_ref_audio:
+                return None, "Please either select a reference audio from the library or upload one."
+            
             kw["voice_clone_prompt"] = model.create_voice_clone_prompt(
-                ref_audio=ref_audio,
+                ref_audio=final_ref_audio,
                 ref_text=ref_text,
             )
 
@@ -312,6 +444,137 @@ by Xiaomi AI Lab Next-gen Kaldi team.
 
         with gr.Tabs():
             # ==============================================================
+            # Reference Audio Library
+            # ==============================================================
+            with gr.TabItem("Reference Audio Library"):
+                gr.Markdown(
+                    """
+## Reference Audio Library
+
+Manage your reference audio files for voice cloning. Upload and name them here,
+then select them in the Voice Clone tab.
+"""
+                )
+
+                def _format_ref_audio_list(items: List[str]) -> str:
+                    if not items:
+                        return "No reference audios saved yet."
+                    return "Saved Reference Audios:\n" + "\n".join(
+                        f"  • {name}" for name in items
+                    )
+
+                def _ref_audio_dropdown_update():
+                    items = audio_manager.get_list()
+                    return gr.update(choices=items, value=None)
+
+                initial_ref_items = audio_manager.get_list()
+                initial_ref_text = _format_ref_audio_list(initial_ref_items)
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        ral_upload = gr.Audio(
+                            label="Upload Audio / 上传音频",
+                            type="filepath",
+                            elem_classes="compact-audio",
+                        )
+                        ral_name = gr.Textbox(
+                            label="Audio Name / 音频名称",
+                            placeholder="e.g., 'John's Voice', 'Female Speaker 1'",
+                        )
+                        ral_btn = gr.Button("Add to Library / 添加到库", variant="primary")
+                        ral_msg = gr.Textbox(label="Message / 消息", interactive=False)
+                    with gr.Column(scale=1):
+                        ral_list = gr.Textbox(
+                            label="Saved Reference Audio List / 已保存的音频列表",
+                            lines=10,
+                            interactive=False,
+                            value=initial_ref_text,
+                        )
+                        ral_refresh_btn = gr.Button("Refresh / 刷新列表")
+                        ral_selected = gr.Dropdown(
+                            label="Select to Delete / 选择要删除的音频",
+                            choices=initial_ref_items,
+                            value=None,
+                        )
+                        ral_delete_btn = gr.Button("Delete Selected / 删除选中", variant="stop")
+
+                def _update_ref_list():
+                    """Update the display list."""
+                    items = audio_manager.get_list()
+                    return (
+                        gr.update(value=_format_ref_audio_list(items)),
+                        gr.update(choices=items, value=None),
+                        gr.update(choices=items, value=None),
+                    )
+
+                def _add_ref_audio(audio_path, name):
+                    """Add a new reference audio to the library."""
+                    if not audio_path:
+                        return (
+                            "Please upload an audio file.",
+                            gr.update(),
+                            gr.update(),
+                            gr.update(),
+                        )
+                    if not name or not name.strip():
+                        return (
+                            "Please enter a name for the audio.",
+                            gr.update(),
+                            gr.update(),
+                            gr.update(),
+                        )
+                    try:
+                        audio_manager.upload_audio(audio_path, name)
+                        items = audio_manager.get_list()
+                        return (
+                            f"✓ Added '{name}' to library.",
+                            gr.update(value=_format_ref_audio_list(items)),
+                            gr.update(choices=items, value=None),
+                            gr.update(choices=items, value=None),
+                        )
+                    except Exception as e:
+                        return (
+                            f"Error: {e}",
+                            gr.update(),
+                            gr.update(),
+                            gr.update(),
+                        )
+
+                def _delete_ref_audio(selected_name):
+                    """Delete a reference audio from the library."""
+                    if not selected_name:
+                        return (
+                            "Please select an audio to delete.",
+                            gr.update(),
+                            gr.update(),
+                            gr.update(),
+                        )
+                    try:
+                        success = audio_manager.delete_audio(selected_name)
+                        if success:
+                            items = audio_manager.get_list()
+                            return (
+                                f"✓ Deleted '{selected_name}' from library.",
+                                gr.update(value=_format_ref_audio_list(items)),
+                                gr.update(choices=items, value=None),
+                                gr.update(choices=items, value=None),
+                            )
+                        else:
+                            return (
+                                f"Audio '{selected_name}' not found.",
+                                gr.update(),
+                                gr.update(),
+                                gr.update(),
+                            )
+                    except Exception as e:
+                        return (
+                            f"Error: {e}",
+                            gr.update(),
+                            gr.update(),
+                            gr.update(),
+                        )
+
+            # ==============================================================
             # Voice Clone
             # ==============================================================
             with gr.TabItem("Voice Clone"):
@@ -322,8 +585,20 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                             lines=4,
                             placeholder="Enter the text you want to synthesize...",
                         )
+                        gr.Markdown("### Reference Audio")
+                        vc_ref_audio_name = gr.Dropdown(
+                            label="Select from Library / 从库中选择",
+                            choices=initial_ref_items,
+                            value=None,
+                            allow_custom_value=False,
+                        )
+                        gr.Markdown(
+                            "<span style='font-size:0.85em;color:#888;'>"
+                            "Or upload a new one (library will be ignored if provided):"
+                            "</span>"
+                        )
                         vc_ref_audio = gr.Audio(
-                            label="Reference Audio / 参考音频",
+                            label="Or Upload New Reference Audio / 或上传新音频",
                             type="filepath",
                             elem_classes="compact-audio",
                         )
@@ -359,7 +634,7 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         vc_status = gr.Textbox(label="Status / 状态", lines=2)
 
                 def _clone_fn(
-                    text, lang, ref_aud, ref_text, instruct, ns, gs, dn, sp, du, pp, po
+                    text, lang, ref_aud_name, ref_aud, ref_text, instruct, ns, gs, dn, sp, du, pp, po
                 ):
                     return _gen(
                         text,
@@ -374,6 +649,7 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         pp,
                         po,
                         mode="clone",
+                        ref_audio_name=ref_aud_name,
                         ref_text=ref_text or None,
                     )
 
@@ -382,6 +658,7 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                     inputs=[
                         vc_text,
                         vc_lang,
+                        vc_ref_audio_name,
                         vc_ref_audio,
                         vc_ref_text,
                         vc_instruct,
@@ -394,6 +671,21 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         vc_po,
                     ],
                     outputs=[vc_audio, vc_status],
+                )
+
+                ral_btn.click(
+                    _add_ref_audio,
+                    inputs=[ral_upload, ral_name],
+                    outputs=[ral_msg, ral_list, ral_selected, vc_ref_audio_name],
+                )
+                ral_refresh_btn.click(
+                    _update_ref_list,
+                    outputs=[ral_list, ral_selected, vc_ref_audio_name],
+                )
+                ral_delete_btn.click(
+                    _delete_ref_audio,
+                    inputs=[ral_selected],
+                    outputs=[ral_msg, ral_list, ral_selected, vc_ref_audio_name],
                 )
 
             # ==============================================================
@@ -525,7 +817,8 @@ def main(argv=None) -> int:
     )
     print("Model loaded.")
 
-    demo = build_demo(model, checkpoint)
+    audio_manager = ReferenceAudioManager()
+    demo = build_demo(model, checkpoint, audio_manager=audio_manager)
 
     demo.queue().launch(
         server_name=args.ip,
