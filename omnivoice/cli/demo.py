@@ -25,6 +25,7 @@ Usage:
 
 import argparse
 import json
+import re
 import logging
 import shutil
 import time
@@ -1188,6 +1189,253 @@ or auto voice.
                     ],
                     outputs=[batch_output_files, batch_status],
                 )
+
+            # ==============================================================
+            # Script Parser
+            # ==============================================================
+            with gr.TabItem("Script Parser"):
+                gr.Markdown(
+                    """
+## Script Parser
+
+Paste a script where each spoken line may start with a speaker tag:
+`[[speaker name]]: text`.
+Each parsed line becomes an editable row. Speaker names default to the
+saved default voice when available. Lines without a speaker tag are
+kept and assigned the default voice as well.
+"""
+                )
+
+                script_count = gr.State(0)
+                SCRIPT_MAX_LINES = 32
+                script_row_containers = []
+                script_textboxes = []
+                script_speaker_boxes = []
+                script_voice_dropdowns = []
+                script_lang_dropdowns = []
+
+                def _script_row_visibility(count: int):
+                    return [gr.update(visible=i < count) for i in range(SCRIPT_MAX_LINES)]
+
+                def _parse_script(text: str):
+                    text = str(text) if text is not None else ""
+                    if not text.strip():
+                        return ["", 0, *(_script_row_visibility(0)), *([gr.update(value="") for _ in range(SCRIPT_MAX_LINES * 4)])]
+                    lines = [l.strip() for l in str(text).splitlines() if l.strip()]
+                    parsed = []
+                    pattern = re.compile(r"^\s*\[\[(.*?)\]\]\s*:\s*(.*)$")
+                    for l in lines:
+                        m = pattern.match(l)
+                        if m:
+                            speaker = m.group(1).strip()
+                            content = m.group(2).strip()
+                        else:
+                            speaker = None
+                            content = l
+                        parsed.append((speaker, content))
+                        if len(parsed) >= SCRIPT_MAX_LINES:
+                            break
+                    count = len(parsed)
+                    vis = _script_row_visibility(count)
+                    # Prepare per-row updates: text, speaker, voice, lang
+                    updates = []
+                    items = audio_manager.get_list()
+                    default_voice = audio_manager.get_default_voice() if audio_manager.get_default_voice() in items else None
+                    default_lang = audio_manager.get_default_language() or "Auto"
+                    for i in range(SCRIPT_MAX_LINES):
+                        if i < count:
+                            spk, txt = parsed[i]
+                            updates.append(gr.update(value=txt))
+                            updates.append(gr.update(value=spk or ""))
+                            updates.append(gr.update(choices=items, value=default_voice))
+                            updates.append(gr.update(choices=_ALL_LANGUAGES, value=default_lang))
+                        else:
+                            updates.append(gr.update(value=""))
+                            updates.append(gr.update(value=""))
+                            updates.append(gr.update(value=None, choices=items))
+                            updates.append(gr.update(value="Auto", choices=_ALL_LANGUAGES))
+                    return [text, count, *vis, *updates]
+
+                with gr.Row():
+                    script_input = gr.TextArea(label="Paste Script / 粘贴脚本", lines=8)
+                    script_file = gr.File(label="Load .txt File", file_count="single", file_types=[".txt"], type="filepath")
+                    script_parse_btn = gr.Button("Parse Script / 解析脚本", variant="primary")
+
+                with gr.Row():
+                    script_parse_msg = gr.Textbox(label="Message", interactive=False)
+
+                for i in range(SCRIPT_MAX_LINES):
+                    with gr.Row(visible=False) as script_row:
+                        with gr.Column(scale=2):
+                            s_text = gr.Textbox(label=f"Line {i+1}", lines=2)
+                        with gr.Column(scale=1):
+                            s_speaker = gr.Textbox(label=f"Speaker {i+1}")
+                            s_voice = gr.Dropdown(label=f"Voice {i+1}", choices=initial_ref_items, value=initial_default_voice, allow_custom_value=False)
+                            s_lang = _lang_dropdown(f"Language {i+1} (optional)")
+
+                    script_row_containers.append(script_row)
+                    script_textboxes.append(s_text)
+                    script_speaker_boxes.append(s_speaker)
+                    script_voice_dropdowns.append(s_voice)
+                    script_lang_dropdowns.append(s_lang)
+
+                # Wire parse button to populate rows (include script_input as first output)
+                outputs = [script_input, script_count, *script_row_containers]
+                # For each row: text, speaker, voice, lang
+                for i in range(SCRIPT_MAX_LINES):
+                    outputs.extend([script_textboxes[i], script_speaker_boxes[i], script_voice_dropdowns[i], script_lang_dropdowns[i]])
+
+                def _load_and_parse(file_path: str):
+                    def _resolve_path(fp):
+                        if not fp:
+                            return None
+                        if isinstance(fp, str):
+                            return fp
+                        if isinstance(fp, dict):
+                            # common keys gradio may provide
+                            for k in ("tmp_path", "tempfile", "file_path", "filepath", "name", "filename"):
+                                if k in fp and fp[k]:
+                                    return fp[k]
+                            # sometimes file object is nested
+                            return fp.get("name") or fp.get("filename")
+                        if isinstance(fp, (list, tuple)) and fp:
+                            return _resolve_path(fp[0])
+                        return None
+
+                    path = _resolve_path(file_path)
+                    if not path:
+                        return _parse_script("")
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                    except Exception:
+                        try:
+                            with open(path, "r", encoding="latin-1") as f:
+                                content = f.read()
+                        except Exception:
+                            return _parse_script("")
+                    return _parse_script(content)
+
+                script_parse_btn.click(_parse_script, inputs=[script_input], outputs=outputs)
+                script_file.change(_load_and_parse, inputs=[script_file], outputs=outputs)
+
+                def _script_generate(current_count, num_step, guidance_scale, denoise, speed_setting, duration_setting, preprocess_prompt, postprocess_output, *row_values):
+                    # Reuse batch-style generator logic
+                    current_count = _plain_value(current_count)
+                    num_step = _plain_value(num_step)
+                    guidance_scale = _plain_value(guidance_scale)
+                    denoise = _plain_value(denoise)
+                    speed_setting = _plain_value(speed_setting)
+                    duration_setting = _plain_value(duration_setting)
+                    preprocess_prompt = _plain_value(preprocess_prompt)
+                    postprocess_output = _plain_value(postprocess_output)
+
+                    rows = []
+                    step = 4
+                    for i in range(SCRIPT_MAX_LINES):
+                        offset = i * step
+                        text = row_values[offset]
+                        speaker = row_values[offset + 1]
+                        voice_name = row_values[offset + 2]
+                        lang = row_values[offset + 3]
+                        if i >= int(current_count or 0):
+                            continue
+                        if not text or not str(text).strip():
+                            continue
+                        rows.append({
+                            "index": i,
+                            "text": str(text).strip(),
+                            "speaker": speaker if speaker else None,
+                            "voice_name": voice_name if voice_name else None,
+                            "lang": lang if lang and lang != "Auto" else None,
+                        })
+
+                    if not rows:
+                        return None, "No script lines to generate."
+
+                    gen_config = OmniVoiceGenerationConfig(
+                        num_step=int(num_step or 32),
+                        guidance_scale=float(guidance_scale) if guidance_scale is not None else 2.0,
+                        denoise=bool(denoise) if denoise is not None else True,
+                        preprocess_prompt=bool(preprocess_prompt),
+                        postprocess_output=bool(postprocess_output),
+                    )
+                    duration = float(duration_setting) if duration_setting is not None and float(duration_setting) > 0 else None
+                    speed = float(speed_setting) if speed_setting is not None and float(speed_setting) != 1.0 else None
+                    batch_output_dir = _default_batch_output_dir()
+                    batch_output_dir.mkdir(parents=True, exist_ok=True)
+
+                    def _merge_audios(audio_arrays: List[np.ndarray]) -> np.ndarray:
+                        if not audio_arrays:
+                            return np.zeros(0, dtype=np.float32)
+                        separator = np.zeros(int(model.sampling_rate * 0.35), dtype=np.float32)
+                        merged_parts = []
+                        for idx, audio_array in enumerate(audio_arrays):
+                            audio_np = np.asarray(audio_array, dtype=np.float32).reshape(-1)
+                            if audio_np.size == 0:
+                                continue
+                            merged_parts.append(audio_np)
+                            if idx != len(audio_arrays) - 1:
+                                merged_parts.append(separator)
+                        if not merged_parts:
+                            return np.zeros(0, dtype=np.float32)
+                        return np.concatenate(merged_parts)
+
+                    row_audios = []
+                    try:
+                        for r in sorted(rows, key=lambda x: x["index"]):
+                            gen_kwargs = dict(
+                                text=r["text"],
+                                language=r["lang"],
+                                duration=duration,
+                                speed=speed,
+                                generation_config=gen_config,
+                            )
+
+                            if r["voice_name"]:
+                                ref_path = audio_manager.get_path(r["voice_name"])
+                                if not ref_path:
+                                    raise ValueError(f"Reference voice '{r['voice_name']}' not found in the library.")
+                                gen_kwargs["voice_clone_prompt"] = model.create_voice_clone_prompt(
+                                    ref_audio=ref_path,
+                                    ref_text=None,
+                                    preprocess_prompt=bool(preprocess_prompt),
+                                )
+
+                            audio = model.generate(**gen_kwargs)
+                            waveform = audio[0]
+                            row_audios.append(waveform)
+
+                    except Exception as e:
+                        return None, f"Error: {type(e).__name__}: {e}"
+
+                    merged_audio = _merge_audios(row_audios)
+                    if merged_audio.size == 0:
+                        return None, "No valid audio was generated."
+
+                    merged_path = batch_output_dir / f"omnioutput_{time.time_ns()}.wav"
+                    sf.write(str(merged_path), merged_audio, model.sampling_rate)
+
+                    summary = f"Generated merged file: {merged_path}"
+                    return str(merged_path), summary
+
+                script_generate_btn = gr.Button("Generate Script Audio / 生成脚本音频", variant="primary")
+                # Build inputs list: count + shared generation settings + per-row fields
+                script_inputs = [
+                    script_count,
+                    batch_ns,
+                    batch_gs,
+                    batch_dn,
+                    batch_sp,
+                    batch_du,
+                    batch_pp,
+                    batch_po,
+                ]
+                for i in range(SCRIPT_MAX_LINES):
+                    script_inputs.extend([script_textboxes[i], script_speaker_boxes[i], script_voice_dropdowns[i], script_lang_dropdowns[i]])
+
+                script_generate_btn.click(_script_generate, inputs=script_inputs, outputs=[batch_output_files, script_parse_msg])
+
 
             # ==============================================================
             # Voice Design
