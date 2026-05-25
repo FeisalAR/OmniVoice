@@ -1228,15 +1228,18 @@ kept and assigned the default voice as well.
                         m = pattern.match(l)
                         if m:
                             speaker = m.group(1).strip()
-                            content = m.group(2).strip()
                         else:
                             speaker = None
-                            content = l
+                        # Remove any [[...]] tags anywhere in the line and any following ':'
+                        content = re.sub(r"\[\[.*?\]\]\s*:?", "", l).strip()
                         parsed.append((speaker, content))
                         if len(parsed) >= SCRIPT_MAX_LINES:
                             break
                     count = len(parsed)
                     vis = _script_row_visibility(count)
+                    # Build cleaned text (remove any [[speaker]] tags)
+                    cleaned_lines = [content for (_spk, content) in parsed]
+                    cleaned_text = "\n".join(cleaned_lines)
                     # Prepare per-row updates: text, speaker, voice, lang
                     updates = []
                     items = audio_manager.get_list()
@@ -1254,7 +1257,7 @@ kept and assigned the default voice as well.
                             updates.append(gr.update(value=""))
                             updates.append(gr.update(value=None, choices=items))
                             updates.append(gr.update(value="Auto", choices=_ALL_LANGUAGES))
-                    return [text, count, *vis, *updates]
+                    return [cleaned_text, count, *vis, *updates]
 
                 with gr.Row():
                     script_input = gr.TextArea(label="Paste Script / 粘贴脚本", lines=8)
