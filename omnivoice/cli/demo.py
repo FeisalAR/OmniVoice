@@ -1390,10 +1390,12 @@ kept and assigned the default voice as well.
                     for l in lines:
                         # First extract a speaker tag anywhere in the line (do not remove yet)
                         sm = re.search(r"\[\[\s*(.*?)\s*\]\]", l)
-                        speaker = sm.group(1).strip() if sm else None
+                        raw_speaker = sm.group(1).strip() if sm else None
                         # Now remove any [[...]] tags and optional following ':' from the line
                         content = re.sub(r"\[\[.*?\]\]\s*:?", "", l).strip()
-                        parsed.append((speaker, content))
+                        # Assign lines without a tag to the Narrator role
+                        assigned_speaker = raw_speaker if raw_speaker else "Narrator"
+                        parsed.append((assigned_speaker, content))
                         if len(parsed) >= SCRIPT_MAX_LINES:
                             break
 
@@ -1826,11 +1828,11 @@ kept and assigned the default voice as well.
                         )
                         # Also update batch and voice-design controls
                         gg_save_btn.click(
-                            lambda: [gr.update(value=audio_manager.get_global_gen_settings().get("num_step", 32)) for _ in batch_ns],
+                            lambda: gr.update(value=audio_manager.get_global_gen_settings().get("num_step", 32)),
                             outputs=[batch_ns],
                         )
                         gg_save_btn.click(
-                            lambda: [gr.update(value=audio_manager.get_global_gen_settings().get("guidance_scale", 2.0)) for _ in batch_gs],
+                            lambda: gr.update(value=audio_manager.get_global_gen_settings().get("guidance_scale", 2.0)),
                             outputs=[batch_gs],
                         )
                         gg_save_btn.click(
