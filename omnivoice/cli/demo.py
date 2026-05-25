@@ -90,12 +90,52 @@ class ReferenceAudioManager:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.manifest_file = self.storage_dir / "manifest.json"
         self.gain_file = self.storage_dir / "gains.json"
+        self.settings_file = self.storage_dir.parent / "global_settings.json"
         self.default_voice_file = self.storage_dir / "default_voice.json"
         self.default_language_file = self.storage_dir / "default_language.json"
         self._load_manifest()
         self._load_gains()
+        self._load_settings()
         self._load_default_voice()
         self._load_default_language()
+
+    def _load_settings(self):
+        try:
+            if self.settings_file.exists():
+                with open(self.settings_file, "r") as f:
+                    self._settings = json.load(f)
+            else:
+                self._settings = {}
+        except Exception:
+            self._settings = {}
+        # Ensure keys exist with sensible defaults
+        self._settings.setdefault("num_step", 32)
+        self._settings.setdefault("guidance_scale", 2.0)
+        self._settings.setdefault("denoise", True)
+        self._settings.setdefault("speed", 1.0)
+        self._settings.setdefault("duration", None)
+        self._settings.setdefault("preprocess_prompt", True)
+        self._settings.setdefault("postprocess_output", True)
+        self._save_settings()
+
+    def _save_settings(self):
+        try:
+            with open(self.settings_file, "w") as f:
+                json.dump(self._settings, f, indent=2)
+        except Exception:
+            pass
+
+    def get_global_gen_settings(self) -> Dict[str, Any]:
+        return dict(self._settings) if hasattr(self, "_settings") else {}
+
+    def set_global_gen_settings(self, settings: Dict[str, Any]) -> None:
+        if not hasattr(self, "_settings"):
+            self._settings = {}
+        # Update only known keys
+        for k in ["num_step", "guidance_scale", "denoise", "speed", "duration", "preprocess_prompt", "postprocess_output"]:
+            if k in settings:
+                self._settings[k] = settings[k]
+        self._save_settings()
 
     def _load_gains(self):
         """Load per-audio gain settings from disk."""
@@ -539,18 +579,19 @@ def build_demo(
         )
 
     # Reusable: optional generation settings accordion
-    def _gen_settings():
+    def _gen_settings(defaults: Optional[Dict[str, Any]] = None):
+        defaults = defaults or {}
         with gr.Accordion("Generation Settings (optional)", open=False):
             sp = gr.Slider(
                 0.5,
                 1.5,
-                value=1.0,
+                value=defaults.get("speed", 1.0),
                 step=0.05,
                 label="Speed",
                 info="1.0 = normal. >1 faster, <1 slower. Ignored if Duration is set.",
             )
             du = gr.Number(
-                value=None,
+                value=defaults.get("duration", None),
                 label="Duration (seconds)",
                 info=(
                     "Leave empty to use speed."
@@ -560,33 +601,33 @@ def build_demo(
             ns = gr.Slider(
                 4,
                 64,
-                value=32,
+                value=defaults.get("num_step", 32),
                 step=1,
                 label="Inference Steps",
                 info="Default: 32. Lower = faster, higher = better quality.",
             )
             dn = gr.Checkbox(
                 label="Denoise",
-                value=True,
+                value=defaults.get("denoise", True),
                 info="Default: enabled. Uncheck to disable denoising.",
             )
             gs = gr.Slider(
                 0.0,
                 4.0,
-                value=2.0,
+                value=defaults.get("guidance_scale", 2.0),
                 step=0.1,
                 label="Guidance Scale (CFG)",
                 info="Default: 2.0.",
             )
             pp = gr.Checkbox(
                 label="Preprocess Prompt",
-                value=True,
+                value=defaults.get("preprocess_prompt", True),
                 info="apply silence removal and trimming to the reference "
                 "audio, add punctuation in the end of reference text (if not already)",
             )
             po = gr.Checkbox(
                 label="Postprocess Output",
-                value=True,
+                value=defaults.get("postprocess_output", True),
                 info="Remove long silences from generated audio.",
             )
         return ns, gs, dn, sp, du, pp, po
@@ -694,6 +735,18 @@ then select them in the Voice Clone tab.
                         ral_default_lang_btn = gr.Button("Set Default Language / 设置默认语种")
                         ral_clear_default_lang_btn = gr.Button("Clear Default Language / 清除默认语种")
 
+                        # Global persistent generation settings
+                        with gr.Accordion("Global Generation Settings (persistent)", open=False):
+                            gg_ns = gr.Slider(4, 64, value=audio_manager.get_global_gen_settings().get("num_step", 32), step=1, label="Inference Steps (global)")
+                            gg_gs = gr.Slider(0.0, 4.0, value=audio_manager.get_global_gen_settings().get("guidance_scale", 2.0), step=0.1, label="Guidance Scale (global)")
+                            gg_dn = gr.Checkbox(label="Denoise (global)", value=audio_manager.get_global_gen_settings().get("denoise", True))
+                            gg_sp = gr.Slider(0.5, 1.5, value=audio_manager.get_global_gen_settings().get("speed", 1.0), step=0.05, label="Speed (global)")
+                            gg_du = gr.Number(value=audio_manager.get_global_gen_settings().get("duration", None), label="Duration (seconds, global)")
+                            gg_pp = gr.Checkbox(label="Preprocess Prompt (global)", value=audio_manager.get_global_gen_settings().get("preprocess_prompt", True))
+                            gg_po = gr.Checkbox(label="Postprocess Output (global)", value=audio_manager.get_global_gen_settings().get("postprocess_output", True))
+                            gg_save_btn = gr.Button("Save Global Settings / 保存全局设置")
+                            gg_msg = gr.Textbox(label="Global Settings Message", interactive=False)
+
                 def _update_ref_list():
                     """Update the display list."""
                     items = audio_manager.get_list()
@@ -717,10 +770,14 @@ then select them in the Voice Clone tab.
                             gr.update(),
                             gr.update(),
                             gr.update(),
+                            gr.update(),
+                            gr.update(),
                         )
                     if not name or not name.strip():
                         return (
                             "Please enter a name for the audio.",
+                            gr.update(),
+                            gr.update(),
                             gr.update(),
                             gr.update(),
                             gr.update(),
@@ -737,12 +794,12 @@ then select them in the Voice Clone tab.
                             gr.update(choices=items, value=None),
                             gr.update(choices=items, value=default_voice),
                             gr.update(choices=items, value=default_voice),
-                            gr.update(choices=items, value=default_voice),
                             gr.update(value=audio_manager.get_gain(default_voice) if default_voice else 0.0),
                         )
                     except Exception as e:
                         return (
                             f"Error: {e}",
+                            gr.update(),
                             gr.update(),
                             gr.update(),
                             gr.update(),
@@ -761,19 +818,18 @@ then select them in the Voice Clone tab.
                     try:
                         success = audio_manager.delete_audio(selected_name)
                         if success:
-                            items = audio_manager.get_list()
-                            default_voice = audio_manager.get_default_voice()
-                            if default_voice not in items:
-                                default_voice = None
-                            return (
-                                f"✓ Deleted '{selected_name}' from library.",
-                                gr.update(value=_format_ref_audio_list(items)),
-                                gr.update(choices=items, value=None),
-                                gr.update(choices=items, value=default_voice),
-                                gr.update(choices=items, value=default_voice),
-                                gr.update(choices=items, value=default_voice),
-                                gr.update(value=audio_manager.get_gain(default_voice) if default_voice else 0.0),
-                            )
+                                items = audio_manager.get_list()
+                                default_voice = audio_manager.get_default_voice()
+                                if default_voice not in items:
+                                    default_voice = None
+                                return (
+                                    f"✓ Deleted '{selected_name}' from library.",
+                                    gr.update(value=_format_ref_audio_list(items)),
+                                    gr.update(choices=items, value=None),
+                                    gr.update(choices=items, value=default_voice),
+                                    gr.update(choices=items, value=default_voice),
+                                    gr.update(value=audio_manager.get_gain(default_voice) if default_voice else 0.0),
+                                )
                         else:
                             return (
                                 f"Audio '{selected_name}' not found.",
@@ -784,6 +840,7 @@ then select them in the Voice Clone tab.
                     except Exception as e:
                         return (
                             f"Error: {e}",
+                            gr.update(),
                             gr.update(),
                             gr.update(),
                             gr.update(),
@@ -809,7 +866,6 @@ then select them in the Voice Clone tab.
                             gr.update(choices=items, value=None),
                             gr.update(choices=items, value=selected_name),
                             gr.update(choices=items, value=selected_name),
-                            gr.update(choices=items, value=selected_name),
                             gr.update(value=audio_manager.get_gain(selected_name) if selected_name else 0.0),
                         )
                     except Exception as e:
@@ -828,7 +884,6 @@ then select them in the Voice Clone tab.
                     return (
                         "✓ Default voice cleared.",
                         gr.update(value=_format_ref_audio_list(items)),
-                        gr.update(choices=items, value=None),
                         gr.update(choices=items, value=None),
                         gr.update(choices=items, value=None),
                         gr.update(choices=items, value=None),
@@ -1744,6 +1799,50 @@ kept and assigned the default voice as well.
                         lambda: gr.update(value="Auto"),
                         outputs=[vd_lang],
                     )
+                    # Wire global settings save to persist and propagate to tabs
+                    try:
+                        def _save_and_propagate(ns, gs, dn, sp, du, pp, po):
+                            settings = dict(
+                                num_step=int(ns) if ns is not None else 32,
+                                guidance_scale=float(gs) if gs is not None else 2.0,
+                                denoise=bool(dn),
+                                speed=float(sp) if sp is not None else 1.0,
+                                duration=(float(du) if du is not None else None),
+                                preprocess_prompt=bool(pp),
+                                postprocess_output=bool(po),
+                            )
+                            audio_manager.set_global_gen_settings(settings)
+                            return (
+                                "✓ Global generation settings saved.",
+                                gr.update(value=settings.get("num_step", 32)),
+                                gr.update(value=settings.get("guidance_scale", 2.0)),
+                            )
+
+                        # propagate to per-tab generation controls
+                        gg_save_btn.click(
+                            _save_and_propagate,
+                            inputs=[gg_ns, gg_gs, gg_dn, gg_sp, gg_du, gg_pp, gg_po],
+                            outputs=[gg_msg, vc_ns, vc_gs],
+                        )
+                        # Also update batch and voice-design controls
+                        gg_save_btn.click(
+                            lambda: [gr.update(value=audio_manager.get_global_gen_settings().get("num_step", 32)) for _ in batch_ns],
+                            outputs=[batch_ns],
+                        )
+                        gg_save_btn.click(
+                            lambda: [gr.update(value=audio_manager.get_global_gen_settings().get("guidance_scale", 2.0)) for _ in batch_gs],
+                            outputs=[batch_gs],
+                        )
+                        gg_save_btn.click(
+                            lambda: gr.update(value=audio_manager.get_global_gen_settings().get("num_step", 32)),
+                            outputs=[vd_ns],
+                        )
+                        gg_save_btn.click(
+                            lambda: gr.update(value=audio_manager.get_global_gen_settings().get("guidance_scale", 2.0)),
+                            outputs=[vd_gs],
+                        )
+                    except Exception:
+                        pass
                 except Exception:
                     # Defensive: if wiring fails (components not present), skip propagation
                     pass

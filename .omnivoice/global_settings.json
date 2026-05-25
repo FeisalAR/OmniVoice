@@ -1,0 +1,9 @@
+{
+  "num_step": 50,
+  "guidance_scale": 3.0,
+  "denoise": true,
+  "speed": 0.85,
+  "duration": 0.0,
+  "preprocess_prompt": true,
+  "postprocess_output": true
+}
