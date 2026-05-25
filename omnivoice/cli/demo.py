@@ -623,9 +623,15 @@ then select them in the Voice Clone tab.
                 def _format_ref_audio_list(items: List[str]) -> str:
                     if not items:
                         return "No reference audios saved yet."
-                    return "Saved Reference Audios:\n" + "\n".join(
-                        f"  • {name}" for name in items
-                    )
+                    lines = []
+                    for name in items:
+                        try:
+                            g = audio_manager.get_gain(name)
+                            g_str = f" ({g:+.1f} dB)" if g is not None else ""
+                        except Exception:
+                            g_str = ""
+                        lines.append(f"  • {name}{g_str}")
+                    return "Saved Reference Audios:\n" + "\n".join(lines)
 
                 def _ref_audio_dropdown_update(default_value: Optional[str] = None):
                     items = audio_manager.get_list()
