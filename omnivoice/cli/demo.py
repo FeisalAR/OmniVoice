@@ -89,11 +89,46 @@ class ReferenceAudioManager:
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.manifest_file = self.storage_dir / "manifest.json"
+        self.gain_file = self.storage_dir / "gains.json"
         self.default_voice_file = self.storage_dir / "default_voice.json"
         self.default_language_file = self.storage_dir / "default_language.json"
         self._load_manifest()
+        self._load_gains()
         self._load_default_voice()
         self._load_default_language()
+
+    def _load_gains(self):
+        """Load per-audio gain settings from disk."""
+        try:
+            if self.gain_file.exists():
+                with open(self.gain_file, "r") as f:
+                    self._gains = json.load(f)
+            else:
+                self._gains = {}
+        except Exception:
+            self._gains = {}
+        # keep only gains for existing manifest entries
+        self._gains = {k: float(v) for k, v in self._gains.items() if k in self._manifest}
+        self._save_gains()
+
+    def _save_gains(self):
+        with open(self.gain_file, "w") as f:
+            json.dump(self._gains, f, indent=2)
+
+    def get_gain(self, name: str) -> float:
+        try:
+            return float(self._gains.get(name, 0.0))
+        except Exception:
+            return 0.0
+
+    def set_gain(self, name: str, gain_db: float) -> None:
+        if name not in self._manifest:
+            raise ValueError(f"Unknown reference audio: {name}")
+        try:
+            self._gains[name] = float(gain_db)
+        except Exception:
+            self._gains[name] = 0.0
+        self._save_gains()
 
     def _load_manifest(self):
         """Load or create the manifest file."""
@@ -102,12 +137,28 @@ class ReferenceAudioManager:
                 self._manifest = json.load(f)
         else:
             self._manifest = {}
-        # Validate that all referenced files exist
-        self._manifest = {
-            name: path
-            for name, path in self._manifest.items()
-            if Path(path).exists()
-        }
+        # Validate and normalize that all referenced files exist. The manifest
+        # may contain legacy entries where the value is a dict or list; try to
+        # coerce to a filepath string when possible.
+        normalized = {}
+        for name, val in list(self._manifest.items()):
+            path_str = None
+            if isinstance(val, str):
+                path_str = val
+            elif isinstance(val, dict):
+                # common keys that might hold a filepath
+                for k in ("path", "filepath", "file", "stored_path", "filename", "file_path"):
+                    if k in val and val[k]:
+                        path_str = val[k]
+                        break
+            elif isinstance(val, (list, tuple)) and val:
+                # take first string-like entry
+                first = val[0]
+                if isinstance(first, str):
+                    path_str = first
+            if path_str and isinstance(path_str, str) and Path(path_str).exists():
+                normalized[name] = path_str
+        self._manifest = normalized
         self._save_manifest()
 
     def _save_manifest(self):
@@ -180,6 +231,10 @@ class ReferenceAudioManager:
         stored_path = self.storage_dir / f"{safe_name}.wav"
         shutil.copy(audio_path, str(stored_path))
         self._manifest[name] = str(stored_path)
+        # Ensure a default gain entry exists
+        if name not in getattr(self, "_gains", {}):
+            self._gains[name] = 0.0
+            self._save_gains()
         self._save_manifest()
         return name
 
@@ -206,6 +261,13 @@ class ReferenceAudioManager:
         if path.exists():
             path.unlink()
         del self._manifest[name]
+        # remove gain entry as well
+        if name in getattr(self, "_gains", {}):
+            try:
+                del self._gains[name]
+                self._save_gains()
+            except Exception:
+                pass
         if self._default_voice == name:
             self._default_voice = None
             self._save_default_voice()
@@ -432,6 +494,14 @@ def build_demo(
         demo_output_dir.mkdir(parents=True, exist_ok=True)
         out_path = demo_output_dir / f"omnioutput_{time.time_ns()}.wav"
         waveform = audio[0]
+        # Apply global gain if cloning from a library reference
+        if mode == "clone" and ref_audio_name:
+            try:
+                g_db = audio_manager.get_gain(ref_audio_name)
+                factor = float(10 ** (float(g_db) / 20.0)) if g_db is not None else 1.0
+                waveform = np.asarray(waveform, dtype=np.float32) * factor
+            except Exception:
+                pass
         sf.write(str(out_path), waveform, sampling_rate)
         return str(out_path), "Done."
 
@@ -598,6 +668,8 @@ then select them in the Voice Clone tab.
                             choices=initial_ref_items,
                             value=None,
                         )
+                        ral_gain = gr.Slider(-12.0, 12.0, value=0.0, step=0.5, label="Gain (dB) / 增益 (dB)", info="Global per-audio gain applied to outputs.")
+                        ral_set_gain_btn = gr.Button("Set Gain / 设置增益")
                         ral_delete_btn = gr.Button("Delete Selected / 删除选中", variant="stop")
                         ral_default = gr.Dropdown(
                             label="Default Voice / 默认语音",
@@ -628,6 +700,7 @@ then select them in the Voice Clone tab.
                         gr.update(choices=items, value=default_voice),
                         gr.update(choices=items, value=default_voice),
                         gr.update(choices=items, value=default_voice),
+                        gr.update(value=audio_manager.get_gain(default_voice) if default_voice else 0.0),
                     )
 
                 def _add_ref_audio(audio_path, name):
@@ -659,6 +732,7 @@ then select them in the Voice Clone tab.
                             gr.update(choices=items, value=default_voice),
                             gr.update(choices=items, value=default_voice),
                             gr.update(choices=items, value=default_voice),
+                            gr.update(value=audio_manager.get_gain(default_voice) if default_voice else 0.0),
                         )
                     except Exception as e:
                         return (
@@ -692,6 +766,7 @@ then select them in the Voice Clone tab.
                                 gr.update(choices=items, value=default_voice),
                                 gr.update(choices=items, value=default_voice),
                                 gr.update(choices=items, value=default_voice),
+                                gr.update(value=audio_manager.get_gain(default_voice) if default_voice else 0.0),
                             )
                         else:
                             return (
@@ -729,6 +804,7 @@ then select them in the Voice Clone tab.
                             gr.update(choices=items, value=selected_name),
                             gr.update(choices=items, value=selected_name),
                             gr.update(choices=items, value=selected_name),
+                            gr.update(value=audio_manager.get_gain(selected_name) if selected_name else 0.0),
                         )
                     except Exception as e:
                         return (
@@ -750,6 +826,7 @@ then select them in the Voice Clone tab.
                         gr.update(choices=items, value=None),
                         gr.update(choices=items, value=None),
                         gr.update(choices=items, value=None),
+                        gr.update(value=0.0),
                     )
 
                 def _set_default_language(selected_lang):
@@ -776,6 +853,20 @@ then select them in the Voice Clone tab.
                         "✓ Default language cleared.",
                         gr.update(value="Auto"),
                     )
+
+                def _on_ref_selected(name: str):
+                    if not name:
+                        return gr.update(value=0.0)
+                    return gr.update(value=audio_manager.get_gain(name))
+
+                def _set_ref_gain(selected_name, gain_value):
+                    if not selected_name:
+                        return "Please select an audio to set gain for.", gr.update(value=0.0)
+                    try:
+                        audio_manager.set_gain(selected_name, float(gain_value))
+                        return f"✓ Gain for '{selected_name}' set to {gain_value} dB.", gr.update(value=float(gain_value))
+                    except Exception as e:
+                        return f"Error: {e}", gr.update()
 
             # ==============================================================
             # Voice Clone
@@ -879,26 +970,28 @@ then select them in the Voice Clone tab.
                 ral_btn.click(
                     _add_ref_audio,
                     inputs=[ral_upload, ral_name],
-                    outputs=[ral_msg, ral_list, ral_selected, ral_default, vc_ref_audio_name],
+                    outputs=[ral_msg, ral_list, ral_selected, ral_default, vc_ref_audio_name, ral_gain],
                 )
                 ral_refresh_btn.click(
                     _update_ref_list,
-                    outputs=[ral_list, ral_selected, ral_default, vc_ref_audio_name],
+                    outputs=[ral_list, ral_selected, ral_default, vc_ref_audio_name, ral_gain],
                 )
                 ral_delete_btn.click(
                     _delete_ref_audio,
                     inputs=[ral_selected],
-                    outputs=[ral_msg, ral_list, ral_selected, ral_default, vc_ref_audio_name],
+                    outputs=[ral_msg, ral_list, ral_selected, ral_default, vc_ref_audio_name, ral_gain],
                 )
                 ral_default_btn.click(
                     _set_default_voice,
                     inputs=[ral_default],
-                    outputs=[ral_msg, ral_list, ral_selected, ral_default, vc_ref_audio_name],
+                    outputs=[ral_msg, ral_list, ral_selected, ral_default, vc_ref_audio_name, ral_gain],
                 )
                 ral_clear_default_btn.click(
                     _clear_default_voice,
-                    outputs=[ral_msg, ral_list, ral_selected, ral_default, vc_ref_audio_name],
+                    outputs=[ral_msg, ral_list, ral_selected, ral_default, vc_ref_audio_name, ral_gain],
                 )
+                ral_selected.change(_on_ref_selected, inputs=[ral_selected], outputs=[ral_gain])
+                ral_set_gain_btn.click(_set_ref_gain, inputs=[ral_selected, ral_gain], outputs=[ral_msg, ral_gain])
                 
 
             # ==============================================================
@@ -1127,6 +1220,14 @@ or auto voice.
 
                             audio = model.generate(**gen_kwargs)
                             waveform = audio[0]
+                            # Apply per-audio global gain if voice_name provided
+                            if r.get("voice_name"):
+                                try:
+                                    g_db = audio_manager.get_gain(r.get("voice_name"))
+                                    factor = float(10 ** (float(g_db) / 20.0)) if g_db is not None else 1.0
+                                except Exception:
+                                    factor = 1.0
+                                waveform = np.asarray(waveform, dtype=np.float32) * factor
                             row_audios.append(waveform)
 
                     except Exception as e:
@@ -1217,7 +1318,6 @@ kept and assigned the default voice as well.
                 script_speaker_map_rows = []
                 script_speaker_map_names = []
                 script_speaker_map_voice_dropdowns = []
-                script_speaker_map_gain_sliders = []
 
                 def _script_row_visibility(count: int):
                     return [gr.update(visible=i < count) for i in range(SCRIPT_MAX_LINES)]
@@ -1267,20 +1367,17 @@ kept and assigned the default voice as well.
                     mapping_row_updates = []
                     mapping_name_updates = []
                     mapping_voice_updates = []
-                    mapping_gain_updates = []
                     for i in range(SCRIPT_MAX_SPEAKERS):
                         if i < len(unique_speakers):
                             mapping_row_updates.append(gr.update(visible=True))
                             mapping_name_updates.append(gr.update(value=unique_speakers[i], visible=True))
                             mapping_voice_updates.append(gr.update(choices=items, value=default_voice, visible=True))
-                            mapping_gain_updates.append(gr.update(value=0.0, visible=True))
                         else:
                             mapping_row_updates.append(gr.update(visible=False))
                             mapping_name_updates.append(gr.update(value="", visible=False))
                             mapping_voice_updates.append(gr.update(choices=items, value=None, visible=False))
-                            mapping_gain_updates.append(gr.update(value=0.0, visible=False))
 
-                    return [cleaned_text, count, *mapping_row_updates, *mapping_name_updates, *mapping_voice_updates, *mapping_gain_updates, *vis, *updates]
+                    return [cleaned_text, count, *mapping_row_updates, *mapping_name_updates, *mapping_voice_updates, *vis, *updates]
 
                 with gr.Row():
                     script_input = gr.TextArea(label="Paste Script / 粘贴脚本", lines=8)
@@ -1292,11 +1389,10 @@ kept and assigned the default voice as well.
                         with gr.Row(visible=False) as map_row:
                             m_name = gr.Textbox(label=f"Speaker {i+1}", interactive=False)
                             m_voice = gr.Dropdown(label=f"Voice for Speaker {i+1}", choices=initial_ref_items, value=initial_default_voice, allow_custom_value=False)
-                            m_gain = gr.Slider(-12.0, 12.0, value=0.0, step=0.5, label=f"Gain (dB) for Speaker {i+1}", info="Adjust output gain for this speaker. Positive = louder.")
                         script_speaker_map_rows.append(map_row)
                         script_speaker_map_names.append(m_name)
                         script_speaker_map_voice_dropdowns.append(m_voice)
-                        script_speaker_map_gain_sliders.append(m_gain)
+                        
 
                 with gr.Row():
                     script_parse_msg = gr.Textbox(label="Message", interactive=False)
@@ -1322,7 +1418,6 @@ kept and assigned the default voice as well.
                 outputs.extend(script_speaker_map_rows)
                 outputs.extend(script_speaker_map_names)
                 outputs.extend(script_speaker_map_voice_dropdowns)
-                outputs.extend(script_speaker_map_gain_sliders)
                 # then row containers
                 outputs.extend(script_row_containers)
                 # For each row: text and hidden speaker
@@ -1374,22 +1469,16 @@ kept and assigned the default voice as well.
                     preprocess_prompt = _plain_value(preprocess_prompt)
                     postprocess_output = _plain_value(postprocess_output)
 
-                    # First part of row_values contains speaker mapping (names then voices then gains)
-                    mapping_count = SCRIPT_MAX_SPEAKERS * 3
+                    # First part of row_values contains speaker mapping (names then voices)
+                    mapping_count = SCRIPT_MAX_SPEAKERS * 2
                     mapping_vals = list(row_values[:mapping_count])
-                    # mapping names are first third, voices second third, gains last third
+                    # mapping names are first half, voices second half
                     mapping_names = [mapping_vals[i] for i in range(0, SCRIPT_MAX_SPEAKERS)]
                     mapping_voices = [mapping_vals[i] for i in range(SCRIPT_MAX_SPEAKERS, SCRIPT_MAX_SPEAKERS * 2)]
-                    mapping_gains = [mapping_vals[i] for i in range(SCRIPT_MAX_SPEAKERS * 2, SCRIPT_MAX_SPEAKERS * 3)]
                     speaker_to_voice = {}
-                    speaker_to_gain = {}
-                    for n, v, g in zip(mapping_names, mapping_voices, mapping_gains):
+                    for n, v in zip(mapping_names, mapping_voices):
                         if n and str(n).strip():
                             speaker_to_voice[str(n).strip()] = v if v else None
-                            try:
-                                speaker_to_gain[str(n).strip()] = float(g) if g is not None else 0.0
-                            except Exception:
-                                speaker_to_gain[str(n).strip()] = 0.0
 
                     rows = []
                     step = 2
@@ -1469,12 +1558,12 @@ kept and assigned the default voice as well.
 
                             audio = model.generate(**gen_kwargs)
                             waveform = audio[0]
-                            # Apply per-speaker gain if specified (dB -> linear)
-                            r_speaker = r.get("speaker")
-                            if r_speaker and str(r_speaker).strip():
-                                g_db = speaker_to_gain.get(str(r_speaker).strip(), 0.0)
+                            # Apply global per-audio gain if this row used a library voice
+                            voice_used = r.get("voice_name")
+                            if voice_used:
                                 try:
-                                    factor = float(10 ** (float(g_db) / 20.0))
+                                    g_db = audio_manager.get_gain(voice_used)
+                                    factor = float(10 ** (float(g_db) / 20.0)) if g_db is not None else 1.0
                                 except Exception:
                                     factor = 1.0
                                 waveform = np.asarray(waveform, dtype=np.float32) * factor
@@ -1505,10 +1594,9 @@ kept and assigned the default voice as well.
                     batch_pp,
                     batch_po,
                 ]
-                # mapping names then mapping voices then mapping gains
+                # mapping names then mapping voices
                 script_inputs.extend(script_speaker_map_names)
                 script_inputs.extend(script_speaker_map_voice_dropdowns)
-                script_inputs.extend(script_speaker_map_gain_sliders)
                 for i in range(SCRIPT_MAX_LINES):
                     script_inputs.extend([script_textboxes[i], script_speaker_boxes[i]])
 
