@@ -88,7 +88,9 @@ class ReferenceAudioManager:
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.manifest_file = self.storage_dir / "manifest.json"
+        self.default_voice_file = self.storage_dir / "default_voice.json"
         self._load_manifest()
+        self._load_default_voice()
 
     def _load_manifest(self):
         """Load or create the manifest file."""
@@ -109,6 +111,25 @@ class ReferenceAudioManager:
         """Save the manifest to disk."""
         with open(self.manifest_file, "w") as f:
             json.dump(self._manifest, f, indent=2)
+
+    def _load_default_voice(self):
+        """Load the saved default voice if present."""
+        self._default_voice = None
+        if self.default_voice_file.exists():
+            try:
+                with open(self.default_voice_file, "r") as f:
+                    data = json.load(f)
+                self._default_voice = data.get("default_voice")
+            except Exception:
+                self._default_voice = None
+        if self._default_voice not in self._manifest:
+            self._default_voice = None
+            self._save_default_voice()
+
+    def _save_default_voice(self):
+        """Persist the current default voice selection."""
+        with open(self.default_voice_file, "w") as f:
+            json.dump({"default_voice": self._default_voice}, f, indent=2)
 
     def upload_audio(self, audio_path: str, name: str) -> str:
         """Upload and register a reference audio with a user-assigned name.
@@ -163,8 +184,20 @@ class ReferenceAudioManager:
         if path.exists():
             path.unlink()
         del self._manifest[name]
+        if self._default_voice == name:
+            self._default_voice = None
+            self._save_default_voice()
         self._save_manifest()
         return True
+
+    def get_default_voice(self) -> Optional[str]:
+        return self._default_voice
+
+    def set_default_voice(self, name: Optional[str]) -> None:
+        if name is not None and name not in self._manifest:
+            raise ValueError(f"Unknown reference audio: {name}")
+        self._default_voice = name
+        self._save_default_voice()
 
     def clear_all(self):
         """Delete all registered audios (for cleanup)."""
@@ -488,12 +521,17 @@ then select them in the Voice Clone tab.
                         f"  • {name}" for name in items
                     )
 
-                def _ref_audio_dropdown_update():
+                def _ref_audio_dropdown_update(default_value: Optional[str] = None):
                     items = audio_manager.get_list()
-                    return gr.update(choices=items, value=None)
+                    if default_value not in items:
+                        default_value = None
+                    return gr.update(choices=items, value=default_value)
 
                 initial_ref_items = audio_manager.get_list()
                 initial_ref_text = _format_ref_audio_list(initial_ref_items)
+                initial_default_voice = audio_manager.get_default_voice()
+                if initial_default_voice not in initial_ref_items:
+                    initial_default_voice = None
 
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -522,14 +560,27 @@ then select them in the Voice Clone tab.
                             value=None,
                         )
                         ral_delete_btn = gr.Button("Delete Selected / 删除选中", variant="stop")
+                        ral_default = gr.Dropdown(
+                            label="Default Voice / 默认语音",
+                            choices=initial_ref_items,
+                            value=initial_default_voice,
+                            allow_custom_value=False,
+                        )
+                        ral_default_btn = gr.Button("Set Default Voice / 设置默认语音")
+                        ral_clear_default_btn = gr.Button("Clear Default Voice / 清除默认语音")
 
                 def _update_ref_list():
                     """Update the display list."""
                     items = audio_manager.get_list()
+                    default_voice = audio_manager.get_default_voice()
+                    if default_voice not in items:
+                        default_voice = None
                     return (
                         gr.update(value=_format_ref_audio_list(items)),
                         gr.update(choices=items, value=None),
-                        gr.update(choices=items, value=None),
+                        gr.update(choices=items, value=default_voice),
+                        gr.update(choices=items, value=default_voice),
+                        gr.update(choices=items, value=default_voice),
                     )
 
                 def _add_ref_audio(audio_path, name):
@@ -551,15 +602,21 @@ then select them in the Voice Clone tab.
                     try:
                         audio_manager.upload_audio(audio_path, name)
                         items = audio_manager.get_list()
+                        default_voice = audio_manager.get_default_voice()
+                        if default_voice not in items:
+                            default_voice = None
                         return (
                             f"✓ Added '{name}' to library.",
                             gr.update(value=_format_ref_audio_list(items)),
                             gr.update(choices=items, value=None),
-                            gr.update(choices=items, value=None),
+                            gr.update(choices=items, value=default_voice),
+                            gr.update(choices=items, value=default_voice),
+                            gr.update(choices=items, value=default_voice),
                         )
                     except Exception as e:
                         return (
                             f"Error: {e}",
+                            gr.update(),
                             gr.update(),
                             gr.update(),
                             gr.update(),
@@ -578,11 +635,16 @@ then select them in the Voice Clone tab.
                         success = audio_manager.delete_audio(selected_name)
                         if success:
                             items = audio_manager.get_list()
+                            default_voice = audio_manager.get_default_voice()
+                            if default_voice not in items:
+                                default_voice = None
                             return (
                                 f"✓ Deleted '{selected_name}' from library.",
                                 gr.update(value=_format_ref_audio_list(items)),
                                 gr.update(choices=items, value=None),
-                                gr.update(choices=items, value=None),
+                                gr.update(choices=items, value=default_voice),
+                                gr.update(choices=items, value=default_voice),
+                                gr.update(choices=items, value=default_voice),
                             )
                         else:
                             return (
@@ -597,7 +659,51 @@ then select them in the Voice Clone tab.
                             gr.update(),
                             gr.update(),
                             gr.update(),
+                            gr.update(),
                         )
+
+                def _set_default_voice(selected_name):
+                    if not selected_name:
+                        return (
+                            "Please select a reference voice.",
+                            gr.update(),
+                            gr.update(),
+                            gr.update(),
+                            gr.update(),
+                            gr.update(),
+                        )
+                    try:
+                        audio_manager.set_default_voice(selected_name)
+                        items = audio_manager.get_list()
+                        return (
+                            f"✓ Default voice set to '{selected_name}'.",
+                            gr.update(value=_format_ref_audio_list(items)),
+                            gr.update(choices=items, value=None),
+                            gr.update(choices=items, value=selected_name),
+                            gr.update(choices=items, value=selected_name),
+                            gr.update(choices=items, value=selected_name),
+                        )
+                    except Exception as e:
+                        return (
+                            f"Error: {e}",
+                            gr.update(),
+                            gr.update(),
+                            gr.update(),
+                            gr.update(),
+                            gr.update(),
+                        )
+
+                def _clear_default_voice():
+                    audio_manager.set_default_voice(None)
+                    items = audio_manager.get_list()
+                    return (
+                        "✓ Default voice cleared.",
+                        gr.update(value=_format_ref_audio_list(items)),
+                        gr.update(choices=items, value=None),
+                        gr.update(choices=items, value=None),
+                        gr.update(choices=items, value=None),
+                        gr.update(choices=items, value=None),
+                    )
 
             # ==============================================================
             # Voice Clone
@@ -614,7 +720,7 @@ then select them in the Voice Clone tab.
                         vc_ref_audio_name = gr.Dropdown(
                             label="Select from Library / 从库中选择",
                             choices=initial_ref_items,
-                            value=None,
+                            value=initial_default_voice,
                             allow_custom_value=False,
                         )
                         gr.Markdown(
@@ -701,17 +807,27 @@ then select them in the Voice Clone tab.
                 ral_btn.click(
                     _add_ref_audio,
                     inputs=[ral_upload, ral_name],
-                    outputs=[ral_msg, ral_list, ral_selected, vc_ref_audio_name],
+                    outputs=[ral_msg, ral_list, ral_selected, ral_default, vc_ref_audio_name],
                 )
                 ral_refresh_btn.click(
                     _update_ref_list,
-                    outputs=[ral_list, ral_selected, vc_ref_audio_name],
+                    outputs=[ral_list, ral_selected, ral_default, vc_ref_audio_name],
                 )
                 ral_delete_btn.click(
                     _delete_ref_audio,
                     inputs=[ral_selected],
-                    outputs=[ral_msg, ral_list, ral_selected, vc_ref_audio_name],
+                    outputs=[ral_msg, ral_list, ral_selected, ral_default, vc_ref_audio_name],
                 )
+                ral_default_btn.click(
+                    _set_default_voice,
+                    inputs=[ral_default],
+                    outputs=[ral_msg, ral_list, ral_selected, ral_default, vc_ref_audio_name],
+                )
+                ral_clear_default_btn.click(
+                    _clear_default_voice,
+                    outputs=[ral_msg, ral_list, ral_selected, ral_default, vc_ref_audio_name],
+                )
+                
 
             # ==============================================================
             # Batch Generate
@@ -747,7 +863,10 @@ or auto voice.
 
                 def _batch_library_choices_update():
                     items = audio_manager.get_list()
-                    return [gr.update(choices=items, value=None) for _ in batch_voice_dropdowns]
+                    default_voice = audio_manager.get_default_voice()
+                    if default_voice not in items:
+                        default_voice = None
+                    return [gr.update(choices=items, value=default_voice) for _ in batch_voice_dropdowns]
 
                 def _plain_value(v):
                     return getattr(v, "value", v)
@@ -789,7 +908,7 @@ or auto voice.
                             voice_i = gr.Dropdown(
                                 label=f"Voice {i + 1} / 语音 {i + 1}",
                                 choices=initial_ref_items,
-                                value=None,
+                                value=initial_default_voice,
                                 allow_custom_value=False,
                                 info="Select a named voice from the library if you want voice cloning.",
                             )
@@ -811,6 +930,15 @@ or auto voice.
                     batch_ref_textboxes.append(ref_text_i)
                     batch_lang_dropdowns.append(lang_i)
                     batch_instruct_textboxes.append(instruct_i)
+
+                    
+
+                # Keep batch dropdowns in sync when library changes
+                ral_btn.click(lambda: _batch_library_choices_update(), outputs=batch_voice_dropdowns)
+                ral_refresh_btn.click(lambda: _batch_library_choices_update(), outputs=batch_voice_dropdowns)
+                ral_delete_btn.click(lambda: _batch_library_choices_update(), outputs=batch_voice_dropdowns)
+                ral_default_btn.click(lambda: _batch_library_choices_update(), outputs=batch_voice_dropdowns)
+                ral_clear_default_btn.click(lambda: _batch_library_choices_update(), outputs=batch_voice_dropdowns)
 
                 def _batch_add(current_count: int):
                     new_count = max(1, min(BATCH_MAX_ROWS, current_count + 1))
@@ -949,11 +1077,14 @@ or auto voice.
                     inputs=[batch_count],
                     outputs=[batch_count, *batch_row_containers, batch_status],
                 )
+                # Ensure newly-added rows pick up the current library choices/default
+                batch_add_btn.click(lambda: _batch_library_choices_update(), outputs=batch_voice_dropdowns)
                 batch_remove_btn.click(
                     _batch_remove,
                     inputs=[batch_count],
                     outputs=[batch_count, *batch_row_containers, batch_status],
                 )
+                batch_remove_btn.click(lambda: _batch_library_choices_update(), outputs=batch_voice_dropdowns)
                 batch_refresh_btn.click(
                     lambda: _batch_library_choices_update(),
                     outputs=batch_voice_dropdowns,
