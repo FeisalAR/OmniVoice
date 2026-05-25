@@ -1208,11 +1208,15 @@ kept and assigned the default voice as well.
 
                 script_count = gr.State(0)
                 SCRIPT_MAX_LINES = 32
+                SCRIPT_MAX_SPEAKERS = 16
                 script_row_containers = []
                 script_textboxes = []
                 script_speaker_boxes = []
                 script_voice_dropdowns = []
                 script_lang_dropdowns = []
+                script_speaker_map_rows = []
+                script_speaker_map_names = []
+                script_speaker_map_voice_dropdowns = []
 
                 def _script_row_visibility(count: int):
                     return [gr.update(visible=i < count) for i in range(SCRIPT_MAX_LINES)]
@@ -1225,12 +1229,10 @@ kept and assigned the default voice as well.
                     parsed = []
                     pattern = re.compile(r"^\s*\[\[(.*?)\]\]\s*:\s*(.*)$")
                     for l in lines:
-                        m = pattern.match(l)
-                        if m:
-                            speaker = m.group(1).strip()
-                        else:
-                            speaker = None
-                        # Remove any [[...]] tags anywhere in the line and any following ':'
+                        # First extract a speaker tag anywhere in the line (do not remove yet)
+                        sm = re.search(r"\[\[\s*(.*?)\s*\]\]", l)
+                        speaker = sm.group(1).strip() if sm else None
+                        # Now remove any [[...]] tags and optional following ':' from the line
                         content = re.sub(r"\[\[.*?\]\]\s*:?", "", l).strip()
                         parsed.append((speaker, content))
                         if len(parsed) >= SCRIPT_MAX_LINES:
@@ -1248,45 +1250,79 @@ kept and assigned the default voice as well.
                     for i in range(SCRIPT_MAX_LINES):
                         if i < count:
                             spk, txt = parsed[i]
-                            updates.append(gr.update(value=txt))
+                            label_text = f"Line {i+1} — {spk}" if spk else f"Line {i+1}"
+                            updates.append(gr.update(value=txt, label=label_text))
+                            # hidden speaker value
                             updates.append(gr.update(value=spk or ""))
-                            updates.append(gr.update(choices=items, value=default_voice))
-                            updates.append(gr.update(choices=_ALL_LANGUAGES, value=default_lang))
                         else:
+                            label_text = f"Line {i+1}"
+                            updates.append(gr.update(value="", label=label_text))
                             updates.append(gr.update(value=""))
-                            updates.append(gr.update(value=""))
-                            updates.append(gr.update(value=None, choices=items))
-                            updates.append(gr.update(value="Auto", choices=_ALL_LANGUAGES))
-                    return [cleaned_text, count, *vis, *updates]
+
+                    # Prepare speaker mapping updates
+                    unique_speakers = []
+                    for spk, _ct in parsed:
+                        if spk and spk not in unique_speakers:
+                            unique_speakers.append(spk)
+
+                    mapping_row_updates = []
+                    mapping_name_updates = []
+                    mapping_voice_updates = []
+                    for i in range(SCRIPT_MAX_SPEAKERS):
+                        if i < len(unique_speakers):
+                            mapping_row_updates.append(gr.update(visible=True))
+                            mapping_name_updates.append(gr.update(value=unique_speakers[i], visible=True))
+                            mapping_voice_updates.append(gr.update(choices=items, value=default_voice, visible=True))
+                        else:
+                            mapping_row_updates.append(gr.update(visible=False))
+                            mapping_name_updates.append(gr.update(value="", visible=False))
+                            mapping_voice_updates.append(gr.update(choices=items, value=None, visible=False))
+
+                    return [cleaned_text, count, *mapping_row_updates, *mapping_name_updates, *mapping_voice_updates, *vis, *updates]
 
                 with gr.Row():
                     script_input = gr.TextArea(label="Paste Script / 粘贴脚本", lines=8)
                     script_file = gr.File(label="Load .txt File", file_count="single", file_types=[".txt"], type="filepath")
                     script_parse_btn = gr.Button("Parse Script / 解析脚本", variant="primary")
 
+                with gr.Accordion("Speaker Mappings (per unique speaker)", open=True):
+                    for i in range(SCRIPT_MAX_SPEAKERS):
+                        with gr.Row(visible=False) as map_row:
+                            m_name = gr.Textbox(label=f"Speaker {i+1}", interactive=False)
+                            m_voice = gr.Dropdown(label=f"Voice for Speaker {i+1}", choices=initial_ref_items, value=initial_default_voice, allow_custom_value=False)
+                        script_speaker_map_rows.append(map_row)
+                        script_speaker_map_names.append(m_name)
+                        script_speaker_map_voice_dropdowns.append(m_voice)
+
                 with gr.Row():
                     script_parse_msg = gr.Textbox(label="Message", interactive=False)
 
+                # Preview player for generated script audio
+                with gr.Row():
+                    script_preview_audio = gr.Audio(label="Preview Audio / 预览音频", type="filepath")
+
                 for i in range(SCRIPT_MAX_LINES):
                     with gr.Row(visible=False) as script_row:
-                        with gr.Column(scale=2):
+                        with gr.Column(scale=3):
                             s_text = gr.Textbox(label=f"Line {i+1}", lines=2)
-                        with gr.Column(scale=1):
-                            s_speaker = gr.Textbox(label=f"Speaker {i+1}")
-                            s_voice = gr.Dropdown(label=f"Voice {i+1}", choices=initial_ref_items, value=initial_default_voice, allow_custom_value=False)
-                            s_lang = _lang_dropdown(f"Language {i+1} (optional)")
+                        # hidden speaker value (not shown to user) used for mapping
+                        s_speaker = gr.Textbox(visible=False)
 
                     script_row_containers.append(script_row)
                     script_textboxes.append(s_text)
                     script_speaker_boxes.append(s_speaker)
-                    script_voice_dropdowns.append(s_voice)
-                    script_lang_dropdowns.append(s_lang)
 
                 # Wire parse button to populate rows (include script_input as first output)
-                outputs = [script_input, script_count, *script_row_containers]
-                # For each row: text, speaker, voice, lang
+                outputs = [script_input, script_count]
+                # include speaker mapping outputs (rows, then names then voices)
+                outputs.extend(script_speaker_map_rows)
+                outputs.extend(script_speaker_map_names)
+                outputs.extend(script_speaker_map_voice_dropdowns)
+                # then row containers
+                outputs.extend(script_row_containers)
+                # For each row: text and hidden speaker
                 for i in range(SCRIPT_MAX_LINES):
-                    outputs.extend([script_textboxes[i], script_speaker_boxes[i], script_voice_dropdowns[i], script_lang_dropdowns[i]])
+                    outputs.extend([script_textboxes[i], script_speaker_boxes[i]])
 
                 def _load_and_parse(file_path: str):
                     def _resolve_path(fp):
@@ -1333,24 +1369,39 @@ kept and assigned the default voice as well.
                     preprocess_prompt = _plain_value(preprocess_prompt)
                     postprocess_output = _plain_value(postprocess_output)
 
+                    # First part of row_values contains speaker mapping (names then voices)
+                    mapping_count = SCRIPT_MAX_SPEAKERS * 2
+                    mapping_vals = list(row_values[:mapping_count])
+                    # mapping names are first half, voices second half
+                    mapping_names = [mapping_vals[i] for i in range(0, SCRIPT_MAX_SPEAKERS)]
+                    mapping_voices = [mapping_vals[i] for i in range(SCRIPT_MAX_SPEAKERS, mapping_count)]
+                    speaker_to_voice = {}
+                    for n, v in zip(mapping_names, mapping_voices):
+                        if n and str(n).strip():
+                            speaker_to_voice[str(n).strip()] = v if v else None
+
                     rows = []
-                    step = 4
+                    step = 2
+                    # remaining values correspond to per-row fields (text, hidden speaker)
+                    row_vals_offset = mapping_count
                     for i in range(SCRIPT_MAX_LINES):
-                        offset = i * step
+                        offset = row_vals_offset + i * step
                         text = row_values[offset]
                         speaker = row_values[offset + 1]
-                        voice_name = row_values[offset + 2]
-                        lang = row_values[offset + 3]
                         if i >= int(current_count or 0):
                             continue
                         if not text or not str(text).strip():
                             continue
+                        # Resolve voice from mapping for speaker
+                        resolved_voice = None
+                        if speaker and str(speaker).strip():
+                            resolved_voice = speaker_to_voice.get(str(speaker).strip())
                         rows.append({
                             "index": i,
                             "text": str(text).strip(),
                             "speaker": speaker if speaker else None,
-                            "voice_name": voice_name if voice_name else None,
-                            "lang": lang if lang and lang != "Auto" else None,
+                            "voice_name": resolved_voice if resolved_voice else None,
+                            "lang": audio_manager.get_default_language() if audio_manager.get_default_language() and audio_manager.get_default_language() != "Auto" else None,
                         })
 
                     if not rows:
@@ -1423,7 +1474,7 @@ kept and assigned the default voice as well.
                     return str(merged_path), summary
 
                 script_generate_btn = gr.Button("Generate Script Audio / 生成脚本音频", variant="primary")
-                # Build inputs list: count + shared generation settings + per-row fields
+                # Build inputs list: count + shared generation settings + mapping inputs + per-row fields
                 script_inputs = [
                     script_count,
                     batch_ns,
@@ -1434,10 +1485,13 @@ kept and assigned the default voice as well.
                     batch_pp,
                     batch_po,
                 ]
+                # mapping names then mapping voices
+                script_inputs.extend(script_speaker_map_names)
+                script_inputs.extend(script_speaker_map_voice_dropdowns)
                 for i in range(SCRIPT_MAX_LINES):
-                    script_inputs.extend([script_textboxes[i], script_speaker_boxes[i], script_voice_dropdowns[i], script_lang_dropdowns[i]])
+                    script_inputs.extend([script_textboxes[i], script_speaker_boxes[i]])
 
-                script_generate_btn.click(_script_generate, inputs=script_inputs, outputs=[batch_output_files, script_parse_msg])
+                script_generate_btn.click(_script_generate, inputs=script_inputs, outputs=[script_preview_audio, script_parse_msg])
 
 
             # ==============================================================
