@@ -1217,17 +1217,15 @@ kept and assigned the default voice as well.
                 script_speaker_map_rows = []
                 script_speaker_map_names = []
                 script_speaker_map_voice_dropdowns = []
+                script_speaker_map_gain_sliders = []
 
                 def _script_row_visibility(count: int):
                     return [gr.update(visible=i < count) for i in range(SCRIPT_MAX_LINES)]
 
                 def _parse_script(text: str):
                     text = str(text) if text is not None else ""
-                    if not text.strip():
-                        return ["", 0, *(_script_row_visibility(0)), *([gr.update(value="") for _ in range(SCRIPT_MAX_LINES * 4)])]
-                    lines = [l.strip() for l in str(text).splitlines() if l.strip()]
+                    lines = [l.strip() for l in str(text).splitlines() if l.strip()] if text.strip() else []
                     parsed = []
-                    pattern = re.compile(r"^\s*\[\[(.*?)\]\]\s*:\s*(.*)$")
                     for l in lines:
                         # First extract a speaker tag anywhere in the line (do not remove yet)
                         sm = re.search(r"\[\[\s*(.*?)\s*\]\]", l)
@@ -1237,12 +1235,13 @@ kept and assigned the default voice as well.
                         parsed.append((speaker, content))
                         if len(parsed) >= SCRIPT_MAX_LINES:
                             break
+
                     count = len(parsed)
                     vis = _script_row_visibility(count)
                     # Build cleaned text (remove any [[speaker]] tags)
                     cleaned_lines = [content for (_spk, content) in parsed]
                     cleaned_text = "\n".join(cleaned_lines)
-                    # Prepare per-row updates: text, speaker, voice, lang
+                    # Prepare per-row updates: text, hidden speaker
                     updates = []
                     items = audio_manager.get_list()
                     default_voice = audio_manager.get_default_voice() if audio_manager.get_default_voice() in items else None
@@ -1259,7 +1258,7 @@ kept and assigned the default voice as well.
                             updates.append(gr.update(value="", label=label_text))
                             updates.append(gr.update(value=""))
 
-                    # Prepare speaker mapping updates
+                    # Prepare speaker mapping updates (names, voices, gains)
                     unique_speakers = []
                     for spk, _ct in parsed:
                         if spk and spk not in unique_speakers:
@@ -1268,17 +1267,20 @@ kept and assigned the default voice as well.
                     mapping_row_updates = []
                     mapping_name_updates = []
                     mapping_voice_updates = []
+                    mapping_gain_updates = []
                     for i in range(SCRIPT_MAX_SPEAKERS):
                         if i < len(unique_speakers):
                             mapping_row_updates.append(gr.update(visible=True))
                             mapping_name_updates.append(gr.update(value=unique_speakers[i], visible=True))
                             mapping_voice_updates.append(gr.update(choices=items, value=default_voice, visible=True))
+                            mapping_gain_updates.append(gr.update(value=0.0, visible=True))
                         else:
                             mapping_row_updates.append(gr.update(visible=False))
                             mapping_name_updates.append(gr.update(value="", visible=False))
                             mapping_voice_updates.append(gr.update(choices=items, value=None, visible=False))
+                            mapping_gain_updates.append(gr.update(value=0.0, visible=False))
 
-                    return [cleaned_text, count, *mapping_row_updates, *mapping_name_updates, *mapping_voice_updates, *vis, *updates]
+                    return [cleaned_text, count, *mapping_row_updates, *mapping_name_updates, *mapping_voice_updates, *mapping_gain_updates, *vis, *updates]
 
                 with gr.Row():
                     script_input = gr.TextArea(label="Paste Script / 粘贴脚本", lines=8)
@@ -1290,9 +1292,11 @@ kept and assigned the default voice as well.
                         with gr.Row(visible=False) as map_row:
                             m_name = gr.Textbox(label=f"Speaker {i+1}", interactive=False)
                             m_voice = gr.Dropdown(label=f"Voice for Speaker {i+1}", choices=initial_ref_items, value=initial_default_voice, allow_custom_value=False)
+                            m_gain = gr.Slider(-12.0, 12.0, value=0.0, step=0.5, label=f"Gain (dB) for Speaker {i+1}", info="Adjust output gain for this speaker. Positive = louder.")
                         script_speaker_map_rows.append(map_row)
                         script_speaker_map_names.append(m_name)
                         script_speaker_map_voice_dropdowns.append(m_voice)
+                        script_speaker_map_gain_sliders.append(m_gain)
 
                 with gr.Row():
                     script_parse_msg = gr.Textbox(label="Message", interactive=False)
@@ -1318,6 +1322,7 @@ kept and assigned the default voice as well.
                 outputs.extend(script_speaker_map_rows)
                 outputs.extend(script_speaker_map_names)
                 outputs.extend(script_speaker_map_voice_dropdowns)
+                outputs.extend(script_speaker_map_gain_sliders)
                 # then row containers
                 outputs.extend(script_row_containers)
                 # For each row: text and hidden speaker
@@ -1369,16 +1374,22 @@ kept and assigned the default voice as well.
                     preprocess_prompt = _plain_value(preprocess_prompt)
                     postprocess_output = _plain_value(postprocess_output)
 
-                    # First part of row_values contains speaker mapping (names then voices)
-                    mapping_count = SCRIPT_MAX_SPEAKERS * 2
+                    # First part of row_values contains speaker mapping (names then voices then gains)
+                    mapping_count = SCRIPT_MAX_SPEAKERS * 3
                     mapping_vals = list(row_values[:mapping_count])
-                    # mapping names are first half, voices second half
+                    # mapping names are first third, voices second third, gains last third
                     mapping_names = [mapping_vals[i] for i in range(0, SCRIPT_MAX_SPEAKERS)]
-                    mapping_voices = [mapping_vals[i] for i in range(SCRIPT_MAX_SPEAKERS, mapping_count)]
+                    mapping_voices = [mapping_vals[i] for i in range(SCRIPT_MAX_SPEAKERS, SCRIPT_MAX_SPEAKERS * 2)]
+                    mapping_gains = [mapping_vals[i] for i in range(SCRIPT_MAX_SPEAKERS * 2, SCRIPT_MAX_SPEAKERS * 3)]
                     speaker_to_voice = {}
-                    for n, v in zip(mapping_names, mapping_voices):
+                    speaker_to_gain = {}
+                    for n, v, g in zip(mapping_names, mapping_voices, mapping_gains):
                         if n and str(n).strip():
                             speaker_to_voice[str(n).strip()] = v if v else None
+                            try:
+                                speaker_to_gain[str(n).strip()] = float(g) if g is not None else 0.0
+                            except Exception:
+                                speaker_to_gain[str(n).strip()] = 0.0
 
                     rows = []
                     step = 2
@@ -1458,6 +1469,15 @@ kept and assigned the default voice as well.
 
                             audio = model.generate(**gen_kwargs)
                             waveform = audio[0]
+                            # Apply per-speaker gain if specified (dB -> linear)
+                            r_speaker = r.get("speaker")
+                            if r_speaker and str(r_speaker).strip():
+                                g_db = speaker_to_gain.get(str(r_speaker).strip(), 0.0)
+                                try:
+                                    factor = float(10 ** (float(g_db) / 20.0))
+                                except Exception:
+                                    factor = 1.0
+                                waveform = np.asarray(waveform, dtype=np.float32) * factor
                             row_audios.append(waveform)
 
                     except Exception as e:
@@ -1485,9 +1505,10 @@ kept and assigned the default voice as well.
                     batch_pp,
                     batch_po,
                 ]
-                # mapping names then mapping voices
+                # mapping names then mapping voices then mapping gains
                 script_inputs.extend(script_speaker_map_names)
                 script_inputs.extend(script_speaker_map_voice_dropdowns)
+                script_inputs.extend(script_speaker_map_gain_sliders)
                 for i in range(SCRIPT_MAX_LINES):
                     script_inputs.extend([script_textboxes[i], script_speaker_boxes[i]])
 
