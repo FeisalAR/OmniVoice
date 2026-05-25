@@ -89,8 +89,10 @@ class ReferenceAudioManager:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.manifest_file = self.storage_dir / "manifest.json"
         self.default_voice_file = self.storage_dir / "default_voice.json"
+        self.default_language_file = self.storage_dir / "default_language.json"
         self._load_manifest()
         self._load_default_voice()
+        self._load_default_language()
 
     def _load_manifest(self):
         """Load or create the manifest file."""
@@ -130,6 +132,25 @@ class ReferenceAudioManager:
         """Persist the current default voice selection."""
         with open(self.default_voice_file, "w") as f:
             json.dump({"default_voice": self._default_voice}, f, indent=2)
+
+    def _load_default_language(self):
+        """Load the saved default language if present."""
+        self._default_language = None
+        if self.default_language_file.exists():
+            try:
+                with open(self.default_language_file, "r") as f:
+                    data = json.load(f)
+                self._default_language = data.get("default_language")
+            except Exception:
+                self._default_language = None
+        if self._default_language not in _ALL_LANGUAGES:
+            self._default_language = None
+            self._save_default_language()
+
+    def _save_default_language(self):
+        """Persist the current default language selection."""
+        with open(self.default_language_file, "w") as f:
+            json.dump({"default_language": self._default_language}, f, indent=2)
 
     def upload_audio(self, audio_path: str, name: str) -> str:
         """Upload and register a reference audio with a user-assigned name.
@@ -193,11 +214,20 @@ class ReferenceAudioManager:
     def get_default_voice(self) -> Optional[str]:
         return self._default_voice
 
+    def get_default_language(self) -> Optional[str]:
+        return self._default_language
+
     def set_default_voice(self, name: Optional[str]) -> None:
         if name is not None and name not in self._manifest:
             raise ValueError(f"Unknown reference audio: {name}")
         self._default_voice = name
         self._save_default_voice()
+
+    def set_default_language(self, lang: Optional[str]) -> None:
+        if lang is not None and lang not in _ALL_LANGUAGES:
+            raise ValueError(f"Unknown language: {lang}")
+        self._default_language = lang
+        self._save_default_language()
 
     def clear_all(self):
         """Delete all registered audios (for cleanup)."""
@@ -423,10 +453,15 @@ def build_demo(
 
     # Reusable: language dropdown component
     def _lang_dropdown(label="Language (optional) / 语种 (可选)", value="Auto"):
+        # Resolve runtime default language from audio_manager when Auto is used
+        runtime_default = audio_manager.get_default_language() or "Auto"
+        chosen = value if value is not None and value != "Auto" else runtime_default
+        if chosen not in _ALL_LANGUAGES:
+            chosen = "Auto"
         return gr.Dropdown(
             label=label,
             choices=_ALL_LANGUAGES,
-            value=value,
+            value=chosen,
             allow_custom_value=False,
             interactive=True,
             info="Keep as Auto to auto-detect the language.",
@@ -532,6 +567,9 @@ then select them in the Voice Clone tab.
                 initial_default_voice = audio_manager.get_default_voice()
                 if initial_default_voice not in initial_ref_items:
                     initial_default_voice = None
+                initial_default_language = audio_manager.get_default_language() or "Auto"
+                if initial_default_language not in _ALL_LANGUAGES:
+                    initial_default_language = "Auto"
 
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -568,6 +606,14 @@ then select them in the Voice Clone tab.
                         )
                         ral_default_btn = gr.Button("Set Default Voice / 设置默认语音")
                         ral_clear_default_btn = gr.Button("Clear Default Voice / 清除默认语音")
+                        ral_default_lang = gr.Dropdown(
+                            label="Default Language / 默认语种",
+                            choices=_ALL_LANGUAGES,
+                            value=initial_default_language,
+                            allow_custom_value=False,
+                        )
+                        ral_default_lang_btn = gr.Button("Set Default Language / 设置默认语种")
+                        ral_clear_default_lang_btn = gr.Button("Clear Default Language / 清除默认语种")
 
                 def _update_ref_list():
                     """Update the display list."""
@@ -703,6 +749,31 @@ then select them in the Voice Clone tab.
                         gr.update(choices=items, value=None),
                         gr.update(choices=items, value=None),
                         gr.update(choices=items, value=None),
+                    )
+
+                def _set_default_language(selected_lang):
+                    if not selected_lang:
+                        return (
+                            "Please select a language.",
+                            gr.update(),
+                        )
+                    try:
+                        audio_manager.set_default_language(selected_lang)
+                        return (
+                            f"✓ Default language set to '{selected_lang}'.",
+                            gr.update(value=selected_lang),
+                        )
+                    except Exception as e:
+                        return (
+                            f"Error: {e}",
+                            gr.update(),
+                        )
+
+                def _clear_default_language():
+                    audio_manager.set_default_language(None)
+                    return (
+                        "✓ Default language cleared.",
+                        gr.update(value="Auto"),
                     )
 
             # ==============================================================
@@ -1214,6 +1285,48 @@ or auto voice.
                     + vd_groups,
                     outputs=[vd_audio, vd_status],
                 )
+
+                # Wire default language controls to update language widgets across tabs
+                try:
+                    ral_default_lang_btn.click(
+                        _set_default_language,
+                        inputs=[ral_default_lang],
+                        outputs=[ral_msg, ral_default_lang],
+                    )
+                    ral_clear_default_lang_btn.click(
+                        _clear_default_language,
+                        outputs=[ral_msg, ral_default_lang],
+                    )
+
+                    # Propagate the saved default language to each language dropdown
+                    ral_default_lang_btn.click(
+                        lambda: gr.update(value=audio_manager.get_default_language() or "Auto"),
+                        outputs=[vc_lang],
+                    )
+                    ral_default_lang_btn.click(
+                        lambda: [gr.update(value=audio_manager.get_default_language() or "Auto") for _ in batch_lang_dropdowns],
+                        outputs=batch_lang_dropdowns,
+                    )
+                    ral_default_lang_btn.click(
+                        lambda: gr.update(value=audio_manager.get_default_language() or "Auto"),
+                        outputs=[vd_lang],
+                    )
+
+                    ral_clear_default_lang_btn.click(
+                        lambda: gr.update(value="Auto"),
+                        outputs=[vc_lang],
+                    )
+                    ral_clear_default_lang_btn.click(
+                        lambda: [gr.update(value="Auto") for _ in batch_lang_dropdowns],
+                        outputs=batch_lang_dropdowns,
+                    )
+                    ral_clear_default_lang_btn.click(
+                        lambda: gr.update(value="Auto"),
+                        outputs=[vd_lang],
+                    )
+                except Exception:
+                    # Defensive: if wiring fails (components not present), skip propagation
+                    pass
 
     return demo
 
