@@ -1440,7 +1440,8 @@ kept and assigned the default voice as well.
                             mapping_name_updates.append(gr.update(value="", visible=False))
                             mapping_voice_updates.append(gr.update(choices=items, value=None, visible=False))
 
-                    return [cleaned_text, count, *mapping_row_updates, *mapping_name_updates, *mapping_voice_updates, *vis, *updates]
+                    parse_msg = f"Parsed {count} lines, unique speakers: {len(unique_speakers)}: {', '.join(unique_speakers)}"
+                    return [cleaned_text, count, *mapping_row_updates, *mapping_name_updates, *mapping_voice_updates, *vis, *updates, parse_msg]
 
                 with gr.Row():
                     script_input = gr.TextArea(label="Paste Script / 粘贴脚本", lines=8)
@@ -1486,6 +1487,8 @@ kept and assigned the default voice as well.
                 # For each row: text and hidden speaker
                 for i in range(SCRIPT_MAX_LINES):
                     outputs.extend([script_textboxes[i], script_speaker_boxes[i]])
+                # Add a parse message output for diagnostics
+                outputs.append(script_parse_msg)
 
                 def _load_and_parse(file_path: str):
                     def _resolve_path(fp):

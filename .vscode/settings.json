@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cd \"i:\\\\Misc\\. Repositories\\\\OmniVoice\" ; python -m py_compile omnivoice/cli/demo\\.py 2>&1$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
