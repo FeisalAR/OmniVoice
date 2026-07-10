@@ -594,8 +594,7 @@ def build_demo(
                 value=defaults.get("duration", None),
                 label="Duration (seconds)",
                 info=(
-                    "Leave empty to use speed."
-                    " Set a fixed duration to override speed."
+                    "Leave empty to use speed. Set a fixed duration to override speed."
                 ),
             )
             ns = gr.Slider(
@@ -963,7 +962,7 @@ then select them in the Voice Clone tab.
                             "</span>"
                         )
                         vc_ref_text = gr.Textbox(
-                            label=("Reference Text (optional)" " / 参考音频文本（可选）"),
+                            label=("Reference Text (optional) / 参考音频文本（可选）"),
                             lines=2,
                             placeholder="Transcript of the reference audio. Leave empty"
                             " to auto-transcribe via ASR models.",

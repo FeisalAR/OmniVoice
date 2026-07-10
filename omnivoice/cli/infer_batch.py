@@ -377,7 +377,9 @@ def run_inference_batch(
     audios = worker_model.generate(
         text=texts,
         language=langs,
-        ref_audio=ref_audio_paths if any(p is not None for p in ref_audio_paths) else None,
+        ref_audio=ref_audio_paths
+        if any(p is not None for p in ref_audio_paths)
+        else None,
         ref_text=ref_texts if any(t is not None for t in ref_texts) else None,
         duration=durations if any(d is not None for d in durations) else None,
         speed=speeds if any(s is not None for s in speeds) else None,

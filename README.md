@@ -190,7 +190,7 @@ audio = model.generate(
 )
 ```
 
-> **Note**: Voice design was trained on Chinese and English data only. It can generalize to other languages, but results can be unstable for some low-resource languages.
+> **Note**: The model is primarily trained on the voice cloning task, so voice cloning is the most stable mode. Voice design is trained on Chinese and English data only. It can generalize to other languages, but may produce unstable results for some low-resource languages or edge cases.
 
 See [docs/voice-design.md](docs/voice-design.md) for the full attribute
 reference, Chinese equivalents, and usage tips.
