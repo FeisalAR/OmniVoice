@@ -38,6 +38,7 @@ import soundfile as sf
 import torch
 
 from omnivoice import OmniVoice, OmniVoiceGenerationConfig
+from omnivoice.utils.audio import load_audio
 from omnivoice.utils.common import get_best_device
 from omnivoice.utils.lang_map import LANG_NAMES, lang_display_name
 
@@ -1464,6 +1465,21 @@ kept and assigned the default voice as well.
                 with gr.Row():
                     script_preview_audio = gr.Audio(label="Preview Audio / 预览音频", type="filepath")
 
+                with gr.Row():
+                    script_bg_audio = gr.Audio(
+                        label="Background Audio (optional) / 背景音频（可选）",
+                        type="filepath",
+                        sources=["upload"],
+                    )
+                    script_bg_volume = gr.Slider(
+                        0.0,
+                        1.0,
+                        value=0.2,
+                        step=0.01,
+                        label="Background Volume / 背景音量",
+                        info="Loops to the full script length before mixing.",
+                    )
+
                 for i in range(SCRIPT_MAX_LINES):
                     with gr.Row(visible=False) as script_row:
                         with gr.Column(scale=3):
@@ -1523,7 +1539,7 @@ kept and assigned the default voice as well.
                 script_parse_btn.click(_parse_script, inputs=[script_input], outputs=outputs)
                 script_file.change(_load_and_parse, inputs=[script_file], outputs=outputs)
 
-                def _script_generate(current_count, num_step, guidance_scale, denoise, speed_setting, duration_setting, preprocess_prompt, postprocess_output, *row_values):
+                def _script_generate(current_count, num_step, guidance_scale, denoise, speed_setting, duration_setting, preprocess_prompt, postprocess_output, background_audio, background_volume, *row_values):
                     # Reuse batch-style generator logic
                     current_count = _plain_value(current_count)
                     num_step = _plain_value(num_step)
@@ -1533,6 +1549,8 @@ kept and assigned the default voice as well.
                     duration_setting = _plain_value(duration_setting)
                     preprocess_prompt = _plain_value(preprocess_prompt)
                     postprocess_output = _plain_value(postprocess_output)
+                    background_audio = _plain_value(background_audio)
+                    background_volume = _plain_value(background_volume)
 
                     # First part of row_values contains speaker mapping (names then voices)
                     mapping_count = SCRIPT_MAX_SPEAKERS * 2
@@ -1600,6 +1618,29 @@ kept and assigned the default voice as well.
                             return np.zeros(0, dtype=np.float32)
                         return np.concatenate(merged_parts)
 
+                    def _mix_background_audio(foreground_audio: np.ndarray, background_audio_path: Optional[str], volume: Optional[float]) -> np.ndarray:
+                        if not background_audio_path:
+                            return foreground_audio
+                        mix_volume = float(volume or 0.0)
+                        if mix_volume <= 0.0:
+                            return foreground_audio
+
+                        bg_audio = load_audio(background_audio_path, model.sampling_rate)
+                        if bg_audio.size == 0:
+                            return foreground_audio
+                        bg_audio = np.asarray(bg_audio, dtype=np.float32).reshape(-1)
+                        if bg_audio.size == 0:
+                            return foreground_audio
+
+                        repeats = int(np.ceil(foreground_audio.shape[0] / bg_audio.shape[0]))
+                        bg_audio = np.tile(bg_audio, repeats)[: foreground_audio.shape[0]]
+
+                        mixed = foreground_audio + (bg_audio * mix_volume)
+                        peak = float(np.max(np.abs(mixed))) if mixed.size else 0.0
+                        if peak > 1.0:
+                            mixed = mixed / peak
+                        return mixed.astype(np.float32, copy=False)
+
                     row_audios = []
                     try:
                         for r in sorted(rows, key=lambda x: x["index"]):
@@ -1641,6 +1682,11 @@ kept and assigned the default voice as well.
                     if merged_audio.size == 0:
                         return None, "No valid audio was generated."
 
+                    try:
+                        merged_audio = _mix_background_audio(merged_audio, background_audio, background_volume)
+                    except Exception as e:
+                        return None, f"Error mixing background audio: {type(e).__name__}: {e}"
+
                     merged_path = batch_output_dir / f"omnioutput_{time.time_ns()}.wav"
                     sf.write(str(merged_path), merged_audio, model.sampling_rate)
 
@@ -1658,6 +1704,8 @@ kept and assigned the default voice as well.
                     batch_du,
                     batch_pp,
                     batch_po,
+                    script_bg_audio,
+                    script_bg_volume,
                 ]
                 # mapping names then mapping voices
                 script_inputs.extend(script_speaker_map_names)
