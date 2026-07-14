@@ -465,6 +465,32 @@ def build_demo(
         audio_manager = ReferenceAudioManager()
 
     sampling_rate = model.sampling_rate
+    voice_prompt_cache: Dict[Tuple[str, Optional[str], bool, int, int], Any] = {}
+
+    def _get_voice_clone_prompt(
+        ref_audio_path: str,
+        ref_text: Optional[str],
+        preprocess_prompt: bool,
+    ):
+        path = Path(ref_audio_path)
+        stat = path.stat()
+        cache_key = (
+            str(path.resolve()),
+            ref_text,
+            bool(preprocess_prompt),
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+        )
+        cached = voice_prompt_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        prompt = model.create_voice_clone_prompt(
+            ref_audio=ref_audio_path,
+            ref_text=ref_text,
+            preprocess_prompt=bool(preprocess_prompt),
+        )
+        voice_prompt_cache[cache_key] = prompt
+        return prompt
 
     # -- shared generation core --
     def _gen_core(
@@ -518,9 +544,10 @@ def build_demo(
             if not final_ref_audio:
                 return None, "Please either select a reference audio from the library or upload one."
             
-            kw["voice_clone_prompt"] = model.create_voice_clone_prompt(
-                ref_audio=final_ref_audio,
+            kw["voice_clone_prompt"] = _get_voice_clone_prompt(
+                ref_audio_path=final_ref_audio,
                 ref_text=ref_text,
+                preprocess_prompt=bool(preprocess_prompt),
             )
 
         if instruct and instruct.strip():
@@ -1273,8 +1300,8 @@ or auto voice.
                                     raise ValueError(
                                         f"Reference voice '{r['voice_name']}' not found in the library."
                                     )
-                                gen_kwargs["voice_clone_prompt"] = model.create_voice_clone_prompt(
-                                    ref_audio=ref_path,
+                                gen_kwargs["voice_clone_prompt"] = _get_voice_clone_prompt(
+                                    ref_audio_path=ref_path,
                                     ref_text=r["ref_text"],
                                     preprocess_prompt=bool(preprocess_prompt),
                                 )
@@ -1656,8 +1683,8 @@ kept and assigned the default voice as well.
                                 ref_path = audio_manager.get_path(r["voice_name"])
                                 if not ref_path:
                                     raise ValueError(f"Reference voice '{r['voice_name']}' not found in the library.")
-                                gen_kwargs["voice_clone_prompt"] = model.create_voice_clone_prompt(
-                                    ref_audio=ref_path,
+                                gen_kwargs["voice_clone_prompt"] = _get_voice_clone_prompt(
+                                    ref_audio_path=ref_path,
                                     ref_text=None,
                                     preprocess_prompt=bool(preprocess_prompt),
                                 )

@@ -1,6 +1,6 @@
 {
   "num_step": 60,
-  "guidance_scale": 3.0,
+  "guidance_scale": 2.2,
   "denoise": true,
   "speed": 1.0,
   "duration": 0.0,
