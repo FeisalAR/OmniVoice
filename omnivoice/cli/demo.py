@@ -1618,8 +1618,8 @@ kept and assigned the default voice as well.
                 )
 
                 script_count = gr.State(0)
-                SCRIPT_MAX_LINES = 32
-                SCRIPT_MAX_SPEAKERS = 16
+                SCRIPT_MAX_LINES = 256
+                SCRIPT_MAX_SPEAKERS = 64
                 script_row_containers = []
                 script_textboxes = []
                 script_speaker_boxes = []
@@ -1649,6 +1649,7 @@ kept and assigned the default voice as well.
                             break
 
                     count = len(parsed)
+                    total_lines = len(lines)
                     vis = _script_row_visibility(count)
                     # Build cleaned text (remove any [[speaker]] tags)
                     cleaned_lines = [content for (_spk, content) in parsed]
@@ -1690,6 +1691,8 @@ kept and assigned the default voice as well.
                             mapping_voice_updates.append(gr.update(choices=items, value=None, visible=False))
 
                     parse_msg = f"Parsed {count} lines, unique speakers: {len(unique_speakers)}: {', '.join(unique_speakers)}"
+                    if total_lines > SCRIPT_MAX_LINES:
+                        parse_msg += f" Truncated at {SCRIPT_MAX_LINES} lines from {total_lines} non-empty lines."
                     return [cleaned_text, count, *mapping_row_updates, *mapping_name_updates, *mapping_voice_updates, *vis, *updates, parse_msg]
 
                 with gr.Row():
