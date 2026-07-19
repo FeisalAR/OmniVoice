@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import html
 import json
 import re
 import logging
@@ -700,7 +701,10 @@ def build_demo(
     .gradio-container .prose {font-size: 1.1em !important;}
     .compact-audio audio {height: 60px !important;}
     .compact-audio .waveform {min-height: 80px !important;}
-    .script-lines-table {overflow-x: hidden !important;}
+    .script-lines-table,
+    .script-lines-table > div,
+    .script-lines-table .table-wrap,
+    .script-lines-table .wrap {overflow-x: hidden !important; max-width: 100% !important;}
     .script-lines-table table {table-layout: fixed !important; width: 100% !important;}
     .script-lines-table th:first-child,
     .script-lines-table td:first-child {width: 140px !important; min-width: 120px !important; max-width: 180px !important;}
@@ -709,12 +713,35 @@ def build_demo(
     .script-lines-table td,
     .script-lines-table textarea,
     .script-lines-table input {white-space: normal !important; overflow-wrap: anywhere !important; word-break: break-word !important;}
+    .script-lines-table [role="gridcell"],
+    .script-lines-table [role="columnheader"],
+    .script-lines-table .cell,
+    .script-lines-table .cell-wrap,
+    .script-lines-table .cell-content,
+    .script-lines-table .dataframe-cell {
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        overflow-wrap: anywhere !important;
+        word-break: break-word !important;
+        height: auto !important;
+        min-height: 3.25rem !important;
+        line-height: 1.55 !important;
+    }
     .script-lines-table tbody tr {border-bottom: 10px solid rgba(15, 23, 42, 0.95) !important;}
     .script-lines-table tbody tr:nth-child(odd) td {background: rgba(30, 41, 59, 0.55) !important;}
     .script-lines-table tbody tr:nth-child(even) td {background: rgba(15, 23, 42, 0.55) !important;}
     .script-lines-table td {padding: 0.85rem 0.75rem !important; vertical-align: top !important; line-height: 1.55 !important;}
     .script-lines-table td:first-child {font-weight: 700 !important; color: #dbeafe !important;}
     .script-lines-table textarea {min-height: 4.5em !important; resize: vertical !important;}
+    .parsed-lines-full {display: grid; gap: 0.75rem; margin: 0.5rem 0 1rem;}
+    .parsed-line-full {display: grid; grid-template-columns: minmax(6rem, 10rem) minmax(0, 1fr); gap: 0.85rem; padding: 0.9rem 1rem; border-left: 4px solid #38bdf8; background: rgba(15, 23, 42, 0.58);}
+    .parsed-line-full:nth-child(odd) {background: rgba(30, 41, 59, 0.6);}
+    .parsed-line-speaker {font-weight: 800; color: #dbeafe; overflow-wrap: anywhere;}
+    .parsed-line-text {white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; line-height: 1.6;}
+    @media (max-width: 720px) {
+        .parsed-line-full {grid-template-columns: 1fr;}
+    }
     #script-download-status {min-height: 1.75rem; margin-top: -0.25rem;}
     #script-download-status .downloaded-check {display: inline-flex; align-items: center; gap: 0.35rem; color: #16a34a; font-weight: 700;}
     #script-download-status .downloaded-check::before {content: "✓"; display: inline-grid; place-items: center; width: 1.25rem; height: 1.25rem; border-radius: 999px; color: #ffffff; background: #16a34a; font-size: 0.9rem; line-height: 1;}
@@ -1691,6 +1718,21 @@ kept and assigned the default voice as well.
                 script_speaker_map_names = []
                 script_speaker_map_voice_dropdowns = []
 
+                def _render_parsed_lines_full(table_rows) -> str:
+                    if not table_rows:
+                        return ""
+                    rendered_rows = []
+                    for speaker, text in table_rows:
+                        speaker_html = html.escape(str(speaker or "Narrator"))
+                        text_html = html.escape(str(text or ""))
+                        rendered_rows.append(
+                            f'<div class="parsed-line-full">'
+                            f'<div class="parsed-line-speaker">{speaker_html}</div>'
+                            f'<div class="parsed-line-text">{text_html}</div>'
+                            f'</div>'
+                        )
+                    return f'<div class="parsed-lines-full">{"".join(rendered_rows)}</div>'
+
                 def _parse_script(text: str):
                     text = str(text) if text is not None else ""
                     lines = [l.strip() for l in str(text).splitlines() if l.strip()] if text.strip() else []
@@ -1737,7 +1779,7 @@ kept and assigned the default voice as well.
                     parse_msg = f"Parsed {count} lines, unique speakers: {len(unique_speakers)}: {', '.join(unique_speakers)}"
                     if total_lines > SCRIPT_MAX_LINES:
                         parse_msg += f" Truncated at {SCRIPT_MAX_LINES} lines from {total_lines} non-empty lines."
-                    return [table_rows, count, *mapping_row_updates, *mapping_name_updates, *mapping_voice_updates, parse_msg]
+                    return [table_rows, _render_parsed_lines_full(table_rows), count, *mapping_row_updates, *mapping_name_updates, *mapping_voice_updates, parse_msg]
 
                 with gr.Row():
                     script_input = gr.TextArea(label="Paste Script / 粘贴脚本", lines=8)
@@ -1756,6 +1798,8 @@ kept and assigned the default voice as well.
 
                 with gr.Row():
                     script_parse_msg = gr.Textbox(label="Message", interactive=False)
+
+                script_full_preview = gr.HTML(label="Parsed Lines Full Text")
 
                 script_table = gr.Dataframe(
                     headers=["Speaker", "Text"],
@@ -1798,7 +1842,7 @@ kept and assigned the default voice as well.
                     )
 
                 # Wire parse button to populate the table and speaker mappings.
-                outputs = [script_table, script_count]
+                outputs = [script_table, script_full_preview, script_count]
                 # include speaker mapping outputs (rows, then names then voices)
                 outputs.extend(script_speaker_map_rows)
                 outputs.extend(script_speaker_map_names)
@@ -1871,6 +1915,15 @@ kept and assigned the default voice as well.
                             speaker_str = ""
                         rows.append((speaker_str or "Narrator", text_str))
                     return rows
+
+                def _refresh_script_full_preview(table_value):
+                    return _render_parsed_lines_full(_coerce_script_table_rows(table_value))
+
+                script_table.change(
+                    _refresh_script_full_preview,
+                    inputs=[script_table],
+                    outputs=[script_full_preview],
+                )
 
                 def _script_generate(current_count, num_step, guidance_scale, denoise, speed_setting, duration_setting, preprocess_prompt, postprocess_output, background_audio_name, background_audio, background_volume, script_rows_table, *row_values):
                     # Reuse batch-style generator logic
