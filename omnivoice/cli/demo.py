@@ -64,6 +64,18 @@ def _default_demo_output_dir() -> Path:
     return project_root / ".omnivoice" / "demo_outputs"
 
 
+def _default_background_audio_storage_dir() -> Path:
+    """Return the repo-local directory for persistent background audio storage."""
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / ".omnivoice" / "background_audio"
+
+
+def _default_background_audio_storage_dir() -> Path:
+    """Return the repo-local directory for persistent background audio storage."""
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / ".omnivoice" / "background_audio"
+
+
 def _safe_path_part(value: str) -> str:
     """Return a filesystem-safe path fragment."""
     safe = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in value)
@@ -341,6 +353,67 @@ class ReferenceAudioManager:
         self._save_manifest()
 
 
+class BackgroundAudioManager:
+    """Manages named background audio files for the demo."""
+
+    def __init__(self, storage_dir: Optional[str] = None):
+        if storage_dir is None:
+            storage_dir = _default_background_audio_storage_dir()
+        self.storage_dir = Path(storage_dir)
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self.manifest_file = self.storage_dir / "manifest.json"
+        self._load_manifest()
+
+    def _load_manifest(self):
+        if self.manifest_file.exists():
+            with open(self.manifest_file, "r") as f:
+                self._manifest = json.load(f)
+        else:
+            self._manifest = {}
+        self._manifest = {
+            k: v
+            for k, v in self._manifest.items()
+            if isinstance(v, str) and Path(v).exists()
+        }
+        self._save_manifest()
+
+    def _save_manifest(self):
+        with open(self.manifest_file, "w") as f:
+            json.dump(self._manifest, f, indent=2)
+
+    def upload_audio(self, audio_path: str, name: str) -> str:
+        if not name or not name.strip():
+            raise ValueError("Audio name cannot be empty.")
+        if not Path(audio_path).exists():
+            raise ValueError(f"Audio file not found: {audio_path}")
+        safe_name = "".join(
+            c if c.isalnum() or c in (" ", "_", "-") else "" for c in name
+        ).strip()
+        if not safe_name:
+            raise ValueError("Audio name must contain at least one alphanumeric character.")
+        suffix = Path(audio_path).suffix or ".wav"
+        stored_path = self.storage_dir / f"{safe_name}{suffix}"
+        shutil.copy(audio_path, str(stored_path))
+        self._manifest[name] = str(stored_path)
+        self._save_manifest()
+        return name
+
+    def get_list(self) -> List[str]:
+        return sorted(self._manifest.keys())
+
+    def get_path(self, name: str) -> Optional[str]:
+        return self._manifest.get(name)
+
+    def delete_audio(self, name: str) -> bool:
+        if name not in self._manifest:
+            return False
+        path = Path(self._manifest[name])
+        if path.exists():
+            path.unlink()
+        del self._manifest[name]
+        self._save_manifest()
+        return True
+
 # ---------------------------------------------------------------------------
 # Language list — all 600+ supported languages
 # ---------------------------------------------------------------------------
@@ -463,6 +536,7 @@ def build_demo(
 
     if audio_manager is None:
         audio_manager = ReferenceAudioManager()
+    background_audio_manager = BackgroundAudioManager()
 
     sampling_rate = model.sampling_rate
     voice_prompt_cache: Dict[Tuple[str, Optional[str], bool, int, int], Any] = {}
@@ -492,6 +566,30 @@ def build_demo(
         voice_prompt_cache[cache_key] = prompt
         return prompt
 
+    def _mix_background_audio(
+        foreground_audio: np.ndarray,
+        background_audio_path: Optional[str],
+        volume: Optional[float],
+    ) -> np.ndarray:
+        if not background_audio_path:
+            return foreground_audio
+        mix_volume = float(volume or 0.0)
+        if mix_volume <= 0.0:
+            return foreground_audio
+        bg_audio = load_audio(background_audio_path, model.sampling_rate)
+        if bg_audio.size == 0:
+            return foreground_audio
+        bg_audio = np.asarray(bg_audio, dtype=np.float32).reshape(-1)
+        if bg_audio.size == 0:
+            return foreground_audio
+        repeats = int(np.ceil(foreground_audio.shape[0] / bg_audio.shape[0]))
+        bg_audio = np.tile(bg_audio, repeats)[: foreground_audio.shape[0]]
+        mixed = foreground_audio + (bg_audio * mix_volume)
+        peak = float(np.max(np.abs(mixed))) if mixed.size else 0.0
+        if peak > 1.0:
+            mixed = mixed / peak
+        return mixed.astype(np.float32, copy=False)
+
     # -- shared generation core --
     def _gen_core(
         text,
@@ -508,6 +606,9 @@ def build_demo(
         mode,
         ref_audio_name=None,
         ref_text=None,
+        background_audio_name=None,
+        background_audio=None,
+        background_volume=None,
     ):
         if not text or not text.strip():
             return None, "Please enter the text to synthesize."
@@ -570,6 +671,17 @@ def build_demo(
                 waveform = np.asarray(waveform, dtype=np.float32) * factor
             except Exception:
                 pass
+        final_background_audio = None
+        if background_audio_name and background_audio_name != "None":
+            final_background_audio = background_audio_manager.get_path(background_audio_name)
+        elif background_audio:
+            final_background_audio = background_audio
+        if final_background_audio:
+            waveform = _mix_background_audio(
+                np.asarray(waveform, dtype=np.float32),
+                final_background_audio,
+                background_volume,
+            )
         sf.write(str(out_path), waveform, sampling_rate)
         return str(out_path), "Done."
 
@@ -712,9 +824,15 @@ then select them in the Voice Clone tab.
                 initial_default_voice = audio_manager.get_default_voice()
                 if initial_default_voice not in initial_ref_items:
                     initial_default_voice = None
+                initial_bg_items = background_audio_manager.get_list()
                 initial_default_language = audio_manager.get_default_language() or "Auto"
                 if initial_default_language not in _ALL_LANGUAGES:
                     initial_default_language = "Auto"
+
+                def _format_bg_audio_list(items: List[str]) -> str:
+                    if not items:
+                        return "No background audios saved yet."
+                    return "Saved Background Audios:\n" + "\n".join(f"  • {name}" for name in items)
 
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -774,6 +892,34 @@ then select them in the Voice Clone tab.
                             gg_save_btn = gr.Button("Save Global Settings / 保存全局设置")
                             gg_msg = gr.Textbox(label="Global Settings Message", interactive=False)
 
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        bg_upload = gr.Audio(
+                            label="Upload Background Audio",
+                            type="filepath",
+                            elem_classes="compact-audio",
+                        )
+                        bg_name = gr.Textbox(
+                            label="Background Audio Name",
+                            placeholder="e.g., 'Rain Loop', 'Cafe Ambience'",
+                        )
+                        bg_add_btn = gr.Button("Add Background Audio", variant="primary")
+                        bg_msg = gr.Textbox(label="Background Audio Message", interactive=False)
+                    with gr.Column(scale=1):
+                        bg_list = gr.Textbox(
+                            label="Saved Background Audio List",
+                            lines=8,
+                            interactive=False,
+                            value=_format_bg_audio_list(initial_bg_items),
+                        )
+                        bg_refresh_btn = gr.Button("Refresh Background Audio List")
+                        bg_selected = gr.Dropdown(
+                            label="Select Background Audio to Delete",
+                            choices=initial_bg_items,
+                            value=None,
+                        )
+                        bg_delete_btn = gr.Button("Delete Selected Background Audio", variant="stop")
+
                 def _update_ref_list():
                     """Update the display list."""
                     items = audio_manager.get_list()
@@ -787,6 +933,21 @@ then select them in the Voice Clone tab.
                         gr.update(choices=items, value=default_voice),
                         gr.update(choices=items, value=default_voice),
                         gr.update(value=audio_manager.get_gain(default_voice) if default_voice else 0.0),
+                    )
+
+                def _bg_dropdown_update(default_value: Optional[str] = None):
+                    items = background_audio_manager.get_list()
+                    if default_value not in items:
+                        default_value = None
+                    return gr.update(choices=items, value=default_value)
+
+                def _update_bg_list():
+                    items = background_audio_manager.get_list()
+                    return (
+                        gr.update(value=_format_bg_audio_list(items)),
+                        gr.update(choices=items, value=None),
+                        _bg_dropdown_update(),
+                        _bg_dropdown_update(),
                     )
 
                 def _add_ref_audio(audio_path, name):
@@ -956,6 +1117,42 @@ then select them in the Voice Clone tab.
                     except Exception as e:
                         return f"Error: {e}", gr.update()
 
+                def _add_bg_audio(audio_path, name):
+                    if not audio_path:
+                        return "Please upload a background audio file.", gr.update(), gr.update(), gr.update(), gr.update()
+                    if not name or not name.strip():
+                        return "Please enter a name for the background audio.", gr.update(), gr.update(), gr.update(), gr.update()
+                    try:
+                        background_audio_manager.upload_audio(audio_path, name)
+                        items = background_audio_manager.get_list()
+                        return (
+                            f"Added background audio '{name}'.",
+                            gr.update(value=_format_bg_audio_list(items)),
+                            gr.update(choices=items, value=None),
+                            _bg_dropdown_update(),
+                            _bg_dropdown_update(),
+                        )
+                    except Exception as e:
+                        return f"Error: {e}", gr.update(), gr.update(), gr.update(), gr.update()
+
+                def _delete_bg_audio(selected_name):
+                    if not selected_name:
+                        return "Please select a background audio to delete.", gr.update(), gr.update(), gr.update(), gr.update()
+                    try:
+                        success = background_audio_manager.delete_audio(selected_name)
+                        if not success:
+                            return f"Background audio '{selected_name}' not found.", gr.update(), gr.update(), gr.update(), gr.update()
+                        items = background_audio_manager.get_list()
+                        return (
+                            f"Deleted background audio '{selected_name}'.",
+                            gr.update(value=_format_bg_audio_list(items)),
+                            gr.update(choices=items, value=None),
+                            _bg_dropdown_update(),
+                            _bg_dropdown_update(),
+                        )
+                    except Exception as e:
+                        return f"Error: {e}", gr.update(), gr.update(), gr.update(), gr.update()
+
             # ==============================================================
             # Voice Clone
             # ==============================================================
@@ -996,6 +1193,25 @@ then select them in the Voice Clone tab.
                             " to auto-transcribe via ASR models.",
                         )
                         vc_lang = _lang_dropdown("Language (optional) / 语种 (可选)")
+                        with gr.Accordion("Background Audio (optional)", open=False):
+                            vc_bg_audio_name = gr.Dropdown(
+                                label="Select Background Audio from Library",
+                                choices=initial_bg_items,
+                                value=None,
+                                allow_custom_value=False,
+                            )
+                            vc_bg_audio = gr.Audio(
+                                label="Or Upload New Background Audio",
+                                type="filepath",
+                                elem_classes="compact-audio",
+                            )
+                            vc_bg_volume = gr.Slider(
+                                0.0,
+                                1.0,
+                                value=0.2,
+                                step=0.01,
+                                label="Background Volume",
+                            )
                         with gr.Accordion("Instruct (optional)", open=False):
                             vc_instruct = gr.Textbox(label="Instruct", lines=2)
                         (
@@ -1016,7 +1232,7 @@ then select them in the Voice Clone tab.
                         vc_status = gr.Textbox(label="Status / 状态", lines=2)
 
                 def _clone_fn(
-                    text, lang, ref_aud_name, ref_aud, ref_text, instruct, ns, gs, dn, sp, du, pp, po
+                    text, lang, ref_aud_name, ref_aud, ref_text, bg_aud_name, bg_aud, bg_vol, instruct, ns, gs, dn, sp, du, pp, po
                 ):
                     return _gen(
                         text,
@@ -1033,6 +1249,9 @@ then select them in the Voice Clone tab.
                         mode="clone",
                         ref_audio_name=ref_aud_name,
                         ref_text=ref_text or None,
+                        background_audio_name=bg_aud_name,
+                        background_audio=bg_aud,
+                        background_volume=bg_vol,
                     )
 
                 vc_btn.click(
@@ -1043,6 +1262,9 @@ then select them in the Voice Clone tab.
                         vc_ref_audio_name,
                         vc_ref_audio,
                         vc_ref_text,
+                        vc_bg_audio_name,
+                        vc_bg_audio,
+                        vc_bg_volume,
                         vc_instruct,
                         vc_ns,
                         vc_gs,
@@ -1493,8 +1715,14 @@ kept and assigned the default voice as well.
                     script_preview_audio = gr.Audio(label="Preview Audio / 预览音频", type="filepath")
 
                 with gr.Row():
+                    script_bg_audio_name = gr.Dropdown(
+                        label="Select Background Audio from Library / 从库中选择背景音频",
+                        choices=initial_bg_items,
+                        value=None,
+                        allow_custom_value=False,
+                    )
                     script_bg_audio = gr.Audio(
-                        label="Background Audio (optional) / 背景音频（可选）",
+                        label="Or Upload Background Audio / 或上传背景音频",
                         type="filepath",
                         sources=["upload"],
                     )
@@ -1566,7 +1794,7 @@ kept and assigned the default voice as well.
                 script_parse_btn.click(_parse_script, inputs=[script_input], outputs=outputs)
                 script_file.change(_load_and_parse, inputs=[script_file], outputs=outputs)
 
-                def _script_generate(current_count, num_step, guidance_scale, denoise, speed_setting, duration_setting, preprocess_prompt, postprocess_output, background_audio, background_volume, *row_values):
+                def _script_generate(current_count, num_step, guidance_scale, denoise, speed_setting, duration_setting, preprocess_prompt, postprocess_output, background_audio_name, background_audio, background_volume, *row_values):
                     # Reuse batch-style generator logic
                     current_count = _plain_value(current_count)
                     num_step = _plain_value(num_step)
@@ -1576,6 +1804,7 @@ kept and assigned the default voice as well.
                     duration_setting = _plain_value(duration_setting)
                     preprocess_prompt = _plain_value(preprocess_prompt)
                     postprocess_output = _plain_value(postprocess_output)
+                    background_audio_name = _plain_value(background_audio_name)
                     background_audio = _plain_value(background_audio)
                     background_volume = _plain_value(background_volume)
 
@@ -1645,29 +1874,6 @@ kept and assigned the default voice as well.
                             return np.zeros(0, dtype=np.float32)
                         return np.concatenate(merged_parts)
 
-                    def _mix_background_audio(foreground_audio: np.ndarray, background_audio_path: Optional[str], volume: Optional[float]) -> np.ndarray:
-                        if not background_audio_path:
-                            return foreground_audio
-                        mix_volume = float(volume or 0.0)
-                        if mix_volume <= 0.0:
-                            return foreground_audio
-
-                        bg_audio = load_audio(background_audio_path, model.sampling_rate)
-                        if bg_audio.size == 0:
-                            return foreground_audio
-                        bg_audio = np.asarray(bg_audio, dtype=np.float32).reshape(-1)
-                        if bg_audio.size == 0:
-                            return foreground_audio
-
-                        repeats = int(np.ceil(foreground_audio.shape[0] / bg_audio.shape[0]))
-                        bg_audio = np.tile(bg_audio, repeats)[: foreground_audio.shape[0]]
-
-                        mixed = foreground_audio + (bg_audio * mix_volume)
-                        peak = float(np.max(np.abs(mixed))) if mixed.size else 0.0
-                        if peak > 1.0:
-                            mixed = mixed / peak
-                        return mixed.astype(np.float32, copy=False)
-
                     row_audios = []
                     try:
                         for r in sorted(rows, key=lambda x: x["index"]):
@@ -1709,8 +1915,13 @@ kept and assigned the default voice as well.
                     if merged_audio.size == 0:
                         return None, "No valid audio was generated."
 
+                    final_background_audio = None
+                    if background_audio_name and background_audio_name != "None":
+                        final_background_audio = background_audio_manager.get_path(background_audio_name)
+                    elif background_audio:
+                        final_background_audio = background_audio
                     try:
-                        merged_audio = _mix_background_audio(merged_audio, background_audio, background_volume)
+                        merged_audio = _mix_background_audio(merged_audio, final_background_audio, background_volume)
                     except Exception as e:
                         return None, f"Error mixing background audio: {type(e).__name__}: {e}"
 
@@ -1731,6 +1942,7 @@ kept and assigned the default voice as well.
                     batch_du,
                     batch_pp,
                     batch_po,
+                    script_bg_audio_name,
                     script_bg_audio,
                     script_bg_volume,
                 ]
@@ -1741,6 +1953,20 @@ kept and assigned the default voice as well.
                     script_inputs.extend([script_textboxes[i], script_speaker_boxes[i]])
 
                 script_generate_btn.click(_script_generate, inputs=script_inputs, outputs=[script_preview_audio, script_parse_msg])
+                bg_add_btn.click(
+                    _add_bg_audio,
+                    inputs=[bg_upload, bg_name],
+                    outputs=[bg_msg, bg_list, bg_selected, vc_bg_audio_name, script_bg_audio_name],
+                )
+                bg_refresh_btn.click(
+                    _update_bg_list,
+                    outputs=[bg_list, bg_selected, vc_bg_audio_name, script_bg_audio_name],
+                )
+                bg_delete_btn.click(
+                    _delete_bg_audio,
+                    inputs=[bg_selected],
+                    outputs=[bg_msg, bg_list, bg_selected, vc_bg_audio_name, script_bg_audio_name],
+                )
 
 
             # ==============================================================
