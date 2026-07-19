@@ -1636,12 +1636,12 @@ kept and assigned the default voice as well.
                     text = str(text) if text is not None else ""
                     lines = [l.strip() for l in str(text).splitlines() if l.strip()] if text.strip() else []
                     parsed = []
+                    speaker_tag_pattern = r"\[\[\s*([^\]\n]+?)\s*\]{1,2}\s*:?"
                     for l in lines:
-                        # First extract a speaker tag anywhere in the line (do not remove yet)
-                        sm = re.search(r"\[\[\s*(.*?)\s*\]\]", l)
+                        # Accept both [[Name]] and malformed [[Name] speaker tags.
+                        sm = re.search(speaker_tag_pattern, l)
                         raw_speaker = sm.group(1).strip() if sm else None
-                        # Now remove any [[...]] tags and optional following ':' from the line
-                        content = re.sub(r"\[\[.*?\]\]\s*:?", "", l).strip()
+                        content = re.sub(speaker_tag_pattern, "", l, count=1).strip()
                         # Assign lines without a tag to the Narrator role
                         assigned_speaker = raw_speaker if raw_speaker else "Narrator"
                         parsed.append((assigned_speaker, content))
