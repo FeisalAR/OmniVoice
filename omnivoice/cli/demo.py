@@ -700,6 +700,73 @@ def build_demo(
     .gradio-container .prose {font-size: 1.1em !important;}
     .compact-audio audio {height: 60px !important;}
     .compact-audio .waveform {min-height: 80px !important;}
+    .script-lines-table {overflow-x: hidden !important;}
+    .script-lines-table table {table-layout: fixed !important; width: 100% !important;}
+    .script-lines-table th:first-child,
+    .script-lines-table td:first-child {width: 140px !important; min-width: 120px !important; max-width: 180px !important;}
+    .script-lines-table th:nth-child(2),
+    .script-lines-table td:nth-child(2) {width: auto !important; white-space: normal !important; overflow-wrap: anywhere !important; word-break: break-word !important;}
+    .script-lines-table td,
+    .script-lines-table textarea,
+    .script-lines-table input {white-space: normal !important; overflow-wrap: anywhere !important; word-break: break-word !important;}
+    .script-lines-table tbody tr {border-bottom: 10px solid rgba(15, 23, 42, 0.95) !important;}
+    .script-lines-table tbody tr:nth-child(odd) td {background: rgba(30, 41, 59, 0.55) !important;}
+    .script-lines-table tbody tr:nth-child(even) td {background: rgba(15, 23, 42, 0.55) !important;}
+    .script-lines-table td {padding: 0.85rem 0.75rem !important; vertical-align: top !important; line-height: 1.55 !important;}
+    .script-lines-table td:first-child {font-weight: 700 !important; color: #dbeafe !important;}
+    .script-lines-table textarea {min-height: 4.5em !important; resize: vertical !important;}
+    #script-download-status {min-height: 1.75rem; margin-top: -0.25rem;}
+    #script-download-status .downloaded-check {display: inline-flex; align-items: center; gap: 0.35rem; color: #16a34a; font-weight: 700;}
+    #script-download-status .downloaded-check::before {content: "✓"; display: inline-grid; place-items: center; width: 1.25rem; height: 1.25rem; border-radius: 999px; color: #ffffff; background: #16a34a; font-size: 0.9rem; line-height: 1;}
+    """
+    js = """
+    () => {
+        const previewId = "script-preview-audio";
+        const statusId = "script-download-status";
+
+        const setDownloaded = () => {
+            const status = document.getElementById(statusId);
+            if (status) {
+                status.innerHTML = '<span class="downloaded-check">Downloaded</span>';
+            }
+        };
+
+        const resetDownloaded = () => {
+            const status = document.getElementById(statusId);
+            if (status) {
+                status.innerHTML = "";
+            }
+        };
+
+        document.addEventListener("click", (event) => {
+            const preview = document.getElementById(previewId);
+            if (!preview || !preview.contains(event.target)) {
+                return;
+            }
+            const clickedDownload = event.target.closest(
+                'a[download], button[aria-label*="Download"], button[title*="Download"], [data-testid*="download"]'
+            );
+            if (clickedDownload) {
+                setTimeout(setDownloaded, 150);
+            }
+        });
+
+        const previewObserver = new MutationObserver(resetDownloaded);
+        const attachObserver = () => {
+            const preview = document.getElementById(previewId);
+            if (preview) {
+                previewObserver.observe(preview, {
+                    attributes: true,
+                    childList: true,
+                    subtree: true,
+                    attributeFilter: ["src", "href"],
+                });
+            } else {
+                setTimeout(attachObserver, 500);
+            }
+        };
+        attachObserver();
+    }
     """
 
     # Reusable: language dropdown component
@@ -1620,17 +1687,9 @@ kept and assigned the default voice as well.
                 script_count = gr.State(0)
                 SCRIPT_MAX_LINES = 256
                 SCRIPT_MAX_SPEAKERS = 64
-                script_row_containers = []
-                script_textboxes = []
-                script_speaker_boxes = []
-                script_voice_dropdowns = []
-                script_lang_dropdowns = []
                 script_speaker_map_rows = []
                 script_speaker_map_names = []
                 script_speaker_map_voice_dropdowns = []
-
-                def _script_row_visibility(count: int):
-                    return [gr.update(visible=i < count) for i in range(SCRIPT_MAX_LINES)]
 
                 def _parse_script(text: str):
                     text = str(text) if text is not None else ""
@@ -1650,27 +1709,12 @@ kept and assigned the default voice as well.
 
                     count = len(parsed)
                     total_lines = len(lines)
-                    vis = _script_row_visibility(count)
                     # Build cleaned text (remove any [[speaker]] tags)
                     cleaned_lines = [content for (_spk, content) in parsed]
                     cleaned_text = "\n".join(cleaned_lines)
-                    # Prepare per-row updates: text, hidden speaker
-                    updates = []
+                    table_rows = [[spk, content] for spk, content in parsed]
                     items = audio_manager.get_list()
                     default_voice = audio_manager.get_default_voice() if audio_manager.get_default_voice() in items else None
-                    default_lang = audio_manager.get_default_language() or "Auto"
-                    for i in range(SCRIPT_MAX_LINES):
-                        if i < count:
-                            spk, txt = parsed[i]
-                            label_text = f"Line {i+1} — {spk}" if spk else f"Line {i+1}"
-                            updates.append(gr.update(value=txt, label=label_text))
-                            # hidden speaker value
-                            updates.append(gr.update(value=spk or ""))
-                        else:
-                            label_text = f"Line {i+1}"
-                            updates.append(gr.update(value="", label=label_text))
-                            updates.append(gr.update(value=""))
-
                     # Prepare speaker mapping updates (names, voices, gains)
                     unique_speakers = []
                     for spk, _ct in parsed:
@@ -1693,7 +1737,7 @@ kept and assigned the default voice as well.
                     parse_msg = f"Parsed {count} lines, unique speakers: {len(unique_speakers)}: {', '.join(unique_speakers)}"
                     if total_lines > SCRIPT_MAX_LINES:
                         parse_msg += f" Truncated at {SCRIPT_MAX_LINES} lines from {total_lines} non-empty lines."
-                    return [cleaned_text, count, *mapping_row_updates, *mapping_name_updates, *mapping_voice_updates, *vis, *updates, parse_msg]
+                    return [table_rows, count, *mapping_row_updates, *mapping_name_updates, *mapping_voice_updates, parse_msg]
 
                 with gr.Row():
                     script_input = gr.TextArea(label="Paste Script / 粘贴脚本", lines=8)
@@ -1713,9 +1757,24 @@ kept and assigned the default voice as well.
                 with gr.Row():
                     script_parse_msg = gr.Textbox(label="Message", interactive=False)
 
+                script_table = gr.Dataframe(
+                    headers=["Speaker", "Text"],
+                    datatype=["str", "str"],
+                    row_count=(1, "dynamic"),
+                    col_count=(2, "fixed"),
+                    label="Parsed Lines",
+                    interactive=True,
+                    elem_classes="script-lines-table",
+                )
+
                 # Preview player for generated script audio
                 with gr.Row():
-                    script_preview_audio = gr.Audio(label="Preview Audio / 预览音频", type="filepath")
+                    script_preview_audio = gr.Audio(
+                        label="Preview Audio / 预览音频",
+                        type="filepath",
+                        elem_id="script-preview-audio",
+                    )
+                gr.HTML("", elem_id="script-download-status")
 
                 with gr.Row():
                     script_bg_audio_name = gr.Dropdown(
@@ -1738,28 +1797,12 @@ kept and assigned the default voice as well.
                         info="Loops to the full script length before mixing.",
                     )
 
-                for i in range(SCRIPT_MAX_LINES):
-                    with gr.Row(visible=False) as script_row:
-                        with gr.Column(scale=3):
-                            s_text = gr.Textbox(label=f"Line {i+1}", lines=2)
-                        # hidden speaker value (not shown to user) used for mapping
-                        s_speaker = gr.Textbox(visible=False)
-
-                    script_row_containers.append(script_row)
-                    script_textboxes.append(s_text)
-                    script_speaker_boxes.append(s_speaker)
-
-                # Wire parse button to populate rows (include script_input as first output)
-                outputs = [script_input, script_count]
+                # Wire parse button to populate the table and speaker mappings.
+                outputs = [script_table, script_count]
                 # include speaker mapping outputs (rows, then names then voices)
                 outputs.extend(script_speaker_map_rows)
                 outputs.extend(script_speaker_map_names)
                 outputs.extend(script_speaker_map_voice_dropdowns)
-                # then row containers
-                outputs.extend(script_row_containers)
-                # For each row: text and hidden speaker
-                for i in range(SCRIPT_MAX_LINES):
-                    outputs.extend([script_textboxes[i], script_speaker_boxes[i]])
                 # Add a parse message output for diagnostics
                 outputs.append(script_parse_msg)
 
@@ -1782,7 +1825,7 @@ kept and assigned the default voice as well.
 
                     path = _resolve_path(file_path)
                     if not path:
-                        return _parse_script("")
+                        return ["", *_parse_script("")]
                     try:
                         with open(path, "r", encoding="utf-8") as f:
                             content = f.read()
@@ -1791,13 +1834,45 @@ kept and assigned the default voice as well.
                             with open(path, "r", encoding="latin-1") as f:
                                 content = f.read()
                         except Exception:
-                            return _parse_script("")
-                    return _parse_script(content)
+                            return ["", *_parse_script("")]
+                    return [content, *_parse_script(content)]
 
                 script_parse_btn.click(_parse_script, inputs=[script_input], outputs=outputs)
-                script_file.change(_load_and_parse, inputs=[script_file], outputs=outputs)
+                script_file.change(_load_and_parse, inputs=[script_file], outputs=[script_input, *outputs])
 
-                def _script_generate(current_count, num_step, guidance_scale, denoise, speed_setting, duration_setting, preprocess_prompt, postprocess_output, background_audio_name, background_audio, background_volume, *row_values):
+                def _coerce_script_table_rows(table_value):
+                    if table_value is None:
+                        return []
+                    if hasattr(table_value, "to_dict"):
+                        table_value = table_value.to_dict("records")
+                    elif isinstance(table_value, dict):
+                        headers = table_value.get("headers") or ["Speaker", "Text"]
+                        data = table_value.get("data") or []
+                        table_value = [
+                            {headers[i]: row[i] if i < len(row) else "" for i in range(len(headers))}
+                            for row in data
+                        ]
+
+                    rows = []
+                    for item in table_value if isinstance(table_value, list) else []:
+                        if isinstance(item, dict):
+                            speaker = item.get("Speaker") or item.get("speaker") or ""
+                            text = item.get("Text") or item.get("text") or ""
+                        elif isinstance(item, (list, tuple)):
+                            speaker = item[0] if len(item) > 0 else ""
+                            text = item[1] if len(item) > 1 else ""
+                        else:
+                            continue
+                        text_str = "" if text is None else str(text).strip()
+                        speaker_str = "" if speaker is None else str(speaker).strip()
+                        if not text_str or text_str.lower() == "nan":
+                            continue
+                        if speaker_str.lower() == "nan":
+                            speaker_str = ""
+                        rows.append((speaker_str or "Narrator", text_str))
+                    return rows
+
+                def _script_generate(current_count, num_step, guidance_scale, denoise, speed_setting, duration_setting, preprocess_prompt, postprocess_output, background_audio_name, background_audio, background_volume, script_rows_table, *row_values):
                     # Reuse batch-style generator logic
                     current_count = _plain_value(current_count)
                     num_step = _plain_value(num_step)
@@ -1811,10 +1886,7 @@ kept and assigned the default voice as well.
                     background_audio = _plain_value(background_audio)
                     background_volume = _plain_value(background_volume)
 
-                    # First part of row_values contains speaker mapping (names then voices)
-                    mapping_count = SCRIPT_MAX_SPEAKERS * 2
-                    mapping_vals = list(row_values[:mapping_count])
-                    # mapping names are first half, voices second half
+                    mapping_vals = list(row_values)
                     mapping_names = [mapping_vals[i] for i in range(0, SCRIPT_MAX_SPEAKERS)]
                     mapping_voices = [mapping_vals[i] for i in range(SCRIPT_MAX_SPEAKERS, SCRIPT_MAX_SPEAKERS * 2)]
                     speaker_to_voice = {}
@@ -1823,24 +1895,11 @@ kept and assigned the default voice as well.
                             speaker_to_voice[str(n).strip()] = v if v else None
 
                     rows = []
-                    step = 2
-                    # remaining values correspond to per-row fields (text, hidden speaker)
-                    row_vals_offset = mapping_count
-                    for i in range(SCRIPT_MAX_LINES):
-                        offset = row_vals_offset + i * step
-                        text = row_values[offset]
-                        speaker = row_values[offset + 1]
-                        if i >= int(current_count or 0):
-                            continue
-                        if not text or not str(text).strip():
-                            continue
-                        # Resolve voice from mapping for speaker
-                        resolved_voice = None
-                        if speaker and str(speaker).strip():
-                            resolved_voice = speaker_to_voice.get(str(speaker).strip())
+                    for i, (speaker, text) in enumerate(_coerce_script_table_rows(script_rows_table)):
+                        resolved_voice = speaker_to_voice.get(speaker) if speaker else None
                         rows.append({
                             "index": i,
-                            "text": str(text).strip(),
+                            "text": text,
                             "speaker": speaker if speaker else None,
                             "voice_name": resolved_voice if resolved_voice else None,
                             "lang": audio_manager.get_default_language() if audio_manager.get_default_language() and audio_manager.get_default_language() != "Auto" else None,
@@ -1948,12 +2007,11 @@ kept and assigned the default voice as well.
                     script_bg_audio_name,
                     script_bg_audio,
                     script_bg_volume,
+                    script_table,
                 ]
                 # mapping names then mapping voices
                 script_inputs.extend(script_speaker_map_names)
                 script_inputs.extend(script_speaker_map_voice_dropdowns)
-                for i in range(SCRIPT_MAX_LINES):
-                    script_inputs.extend([script_textboxes[i], script_speaker_boxes[i]])
 
                 script_generate_btn.click(_script_generate, inputs=script_inputs, outputs=[script_preview_audio, script_parse_msg])
                 bg_add_btn.click(
@@ -2155,6 +2213,7 @@ kept and assigned the default voice as well.
                     # Defensive: if wiring fails (components not present), skip propagation
                     pass
 
+    demo._omnivoice_launch_js = js
     return demo
 
 
@@ -2195,6 +2254,7 @@ def main(argv=None) -> int:
         server_port=args.port,
         share=args.share,
         root_path=args.root_path,
+        js=getattr(demo, "_omnivoice_launch_js", None),
     )
     return 0
 
