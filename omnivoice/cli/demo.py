@@ -1712,7 +1712,7 @@ kept and assigned the default voice as well.
                 )
 
                 script_count = gr.State(0)
-                SCRIPT_MAX_LINES = 256
+                SCRIPT_MAX_LINES = 1024
                 SCRIPT_MAX_SPEAKERS = 64
                 script_speaker_map_rows = []
                 script_speaker_map_names = []
