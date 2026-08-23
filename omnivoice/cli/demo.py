@@ -520,6 +520,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="ASR model path or HuggingFace repo id"
         " (default: openai/whisper-large-v3-turbo).",
     )
+    parser.add_argument(
+        "--gpu-memory-fraction",
+        type=float,
+        default=0.90,
+        help="Maximum fraction of CUDA memory this process may reserve (default: 0.90).",
+    )
     return parser
 
 
@@ -745,6 +751,12 @@ def build_demo(
     #script-download-status {min-height: 1.75rem; margin-top: -0.25rem;}
     #script-download-status .downloaded-check {display: inline-flex; align-items: center; gap: 0.35rem; color: #16a34a; font-weight: 700;}
     #script-download-status .downloaded-check::before {content: "✓"; display: inline-grid; place-items: center; width: 1.25rem; height: 1.25rem; border-radius: 999px; color: #ffffff; background: #16a34a; font-size: 0.9rem; line-height: 1;}
+    .script-scroll-controls {display: contents !important;}
+    #script-scroll-top, #script-scroll-bottom {position: fixed !important; right: 1.25rem; z-index: 1000; width: 2.75rem; height: 2.75rem;}
+    #script-scroll-top {bottom: 4.5rem;}
+    #script-scroll-bottom {bottom: 1.25rem;}
+    #script-scroll-top button, #script-scroll-bottom button {display: grid; place-items: center; width: 100%; height: 100%; padding: 0; border: 1px solid #475569; border-radius: 50%; color: #f8fafc; background: #0f172a; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35); font-size: 1.35rem; line-height: 1; cursor: pointer;}
+    #script-scroll-top button:hover, #script-scroll-bottom button:hover {background: #1e293b; border-color: #38bdf8;}
     """
     js = """
     () => {
@@ -865,7 +877,7 @@ def build_demo(
             )
         return ns, gs, dn, sp, du, pp, po
 
-    with gr.Blocks(theme=theme, css=css, title="OmniVoice Demo") as demo:
+    with gr.Blocks(theme=theme, css=css, js=js, title="OmniVoice Demo") as demo:
         gr.Markdown(
             """
 # OmniVoice Demo
@@ -1699,6 +1711,17 @@ or auto voice.
             # Script Parser
             # ==============================================================
             with gr.TabItem("Script Parser"):
+                with gr.Column(elem_classes="script-scroll-controls"):
+                    script_scroll_top = gr.Button("↑", elem_id="script-scroll-top")
+                    script_scroll_bottom = gr.Button("↓", elem_id="script-scroll-bottom")
+                script_scroll_top.click(
+                    fn=None,
+                    js="() => document.scrollingElement.scrollTo({top: 0, behavior: 'smooth'})",
+                )
+                script_scroll_bottom.click(
+                    fn=None,
+                    js="() => document.scrollingElement.scrollTo({top: document.scrollingElement.scrollHeight, behavior: 'smooth'})",
+                )
                 gr.Markdown(
                     """
 ## Script Parser
@@ -1712,8 +1735,10 @@ kept and assigned the default voice as well.
                 )
 
                 script_count = gr.State(0)
-                SCRIPT_MAX_LINES = 1024
+                SCRIPT_MAX_LINES = 5048
                 SCRIPT_MAX_SPEAKERS = 64
+                # Tuned for 12 GB GPUs such as the RTX 3080 Ti.
+                SCRIPT_GENERATION_BATCH_SIZE = 2
                 script_speaker_map_rows = []
                 script_speaker_map_names = []
                 script_speaker_map_voice_dropdowns = []
@@ -1927,6 +1952,7 @@ kept and assigned the default voice as well.
 
                 def _script_generate(current_count, num_step, guidance_scale, denoise, speed_setting, duration_setting, preprocess_prompt, postprocess_output, background_audio_name, background_audio, background_volume, script_rows_table, *row_values):
                     # Reuse batch-style generator logic
+                    generation_started = time.perf_counter()
                     current_count = _plain_value(current_count)
                     num_step = _plain_value(num_step)
                     guidance_scale = _plain_value(guidance_scale)
@@ -1955,7 +1981,9 @@ kept and assigned the default voice as well.
                             "text": text,
                             "speaker": speaker if speaker else None,
                             "voice_name": resolved_voice if resolved_voice else None,
-                            "lang": audio_manager.get_default_language() if audio_manager.get_default_language() and audio_manager.get_default_language() != "Auto" else None,
+                            # Script Parser always synthesizes German, independent of
+                            # the reference voice's source language.
+                            "lang": "de",
                         })
 
                     if not rows:
@@ -1989,39 +2017,62 @@ kept and assigned the default voice as well.
                             return np.zeros(0, dtype=np.float32)
                         return np.concatenate(merged_parts)
 
-                    row_audios = []
+                    row_audios = [None] * len(rows)
                     try:
-                        for r in sorted(rows, key=lambda x: x["index"]):
-                            gen_kwargs = dict(
-                                text=r["text"],
-                                language=r["lang"],
-                                duration=duration,
-                                speed=speed,
-                                generation_config=gen_config,
+                        voice_settings = {}
+                        for r in rows:
+                            voice_name = r["voice_name"]
+                            if not voice_name or voice_name in voice_settings:
+                                continue
+                            ref_path = audio_manager.get_path(voice_name)
+                            if not ref_path:
+                                raise ValueError(f"Reference voice '{voice_name}' not found in the library.")
+                            prompt = _get_voice_clone_prompt(
+                                ref_audio_path=ref_path,
+                                ref_text=None,
+                                preprocess_prompt=bool(preprocess_prompt),
                             )
+                            try:
+                                g_db = audio_manager.get_gain(voice_name)
+                                gain = float(10 ** (float(g_db) / 20.0)) if g_db is not None else 1.0
+                            except Exception:
+                                gain = 1.0
+                            voice_settings[voice_name] = (prompt, gain)
 
-                            if r["voice_name"]:
-                                ref_path = audio_manager.get_path(r["voice_name"])
-                                if not ref_path:
-                                    raise ValueError(f"Reference voice '{r['voice_name']}' not found in the library.")
-                                gen_kwargs["voice_clone_prompt"] = _get_voice_clone_prompt(
-                                    ref_audio_path=ref_path,
-                                    ref_text=None,
-                                    preprocess_prompt=bool(preprocess_prompt),
+                        # Homogeneous, similarly sized batches minimize padding and VRAM use.
+                        for uses_clone in (True, False):
+                            compatible_rows = [r for r in rows if bool(r["voice_name"]) == uses_clone]
+                            compatible_rows.sort(key=lambda r: len(r["text"]), reverse=True)
+                            for offset in range(0, len(compatible_rows), SCRIPT_GENERATION_BATCH_SIZE):
+                                batch = compatible_rows[offset : offset + SCRIPT_GENERATION_BATCH_SIZE]
+                                gen_kwargs = dict(
+                                    text=[r["text"] for r in batch],
+                                    language=[r["lang"] for r in batch],
+                                    duration=duration,
+                                    speed=speed,
+                                    generation_config=gen_config,
                                 )
-
-                            audio = model.generate(**gen_kwargs)
-                            waveform = audio[0]
-                            # Apply global per-audio gain if this row used a library voice
-                            voice_used = r.get("voice_name")
-                            if voice_used:
+                                if uses_clone:
+                                    gen_kwargs["voice_clone_prompt"] = [voice_settings[r["voice_name"]][0] for r in batch]
                                 try:
-                                    g_db = audio_manager.get_gain(voice_used)
-                                    factor = float(10 ** (float(g_db) / 20.0)) if g_db is not None else 1.0
-                                except Exception:
-                                    factor = 1.0
-                                waveform = np.asarray(waveform, dtype=np.float32) * factor
-                            row_audios.append(waveform)
+                                    audio = model.generate(**gen_kwargs)
+                                except torch.OutOfMemoryError:
+                                    torch.cuda.empty_cache()
+                                    audio = []
+                                    for r in batch:
+                                        single_kwargs = dict(
+                                            text=r["text"], language=r["lang"], duration=duration,
+                                            speed=speed, generation_config=gen_config,
+                                        )
+                                        if uses_clone:
+                                            single_kwargs["voice_clone_prompt"] = voice_settings[r["voice_name"]][0]
+                                        audio.extend(model.generate(**single_kwargs))
+                                for r, waveform in zip(batch, audio):
+                                    gain = voice_settings[r["voice_name"]][1] if uses_clone else 1.0
+                                    row_audios[r["index"]] = np.asarray(waveform, dtype=np.float32) * gain
+
+                        if any(audio is None for audio in row_audios):
+                            raise RuntimeError("One or more script lines were not generated.")
 
                     except Exception as e:
                         return None, f"Error: {type(e).__name__}: {e}"
@@ -2043,7 +2094,11 @@ kept and assigned the default voice as well.
                     merged_path = batch_output_dir / f"omnioutput_{time.time_ns()}.wav"
                     sf.write(str(merged_path), merged_audio, model.sampling_rate)
 
-                    summary = f"Generated merged file: {merged_path}"
+                    elapsed_seconds = time.perf_counter() - generation_started
+                    summary = (
+                        f"Generated {len(rows)} script lines in {elapsed_seconds:.1f}s. "
+                        f"Merged file: {merged_path}"
+                    )
                     return str(merged_path), summary
 
                 script_generate_btn = gr.Button("Generate Script Audio / 生成脚本音频", variant="primary")
@@ -2284,6 +2339,25 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     device = args.device or get_best_device()
+
+    if not 0.0 < args.gpu_memory_fraction <= 1.0:
+        parser.error("--gpu-memory-fraction must be greater than 0 and at most 1")
+    if str(device).startswith("cuda"):
+        cuda_device = torch.device(device)
+        cuda_index = (
+            torch.cuda.current_device()
+            if cuda_device.index is None
+            else cuda_device.index
+        )
+        # Set this before model loading so model weights and generation buffers
+        # cannot consume all VRAM on the display GPU.
+        torch.cuda.set_per_process_memory_fraction(
+            args.gpu_memory_fraction, cuda_index
+        )
+        logging.info(
+            "Limiting this process to %.0f%% of CUDA memory.",
+            args.gpu_memory_fraction * 100,
+        )
 
     checkpoint = args.model
     if not checkpoint:
